@@ -36,8 +36,8 @@ Complete project documentation can be found at [requests-cache.readthedocs.io](h
   [Cache-Control](https://requests-cache.readthedocs.io/en/stable/user_guide/headers.html#cache-control)
   and other standard HTTP headers, define your own expiration schedule, keep your cache clutter-free
   with backends that natively support TTL, or any combination of strategies
-* **Customization:** Works out of the box with zero config, but with a robust set of features for
-  configuring and extending the library to suit your needs
+* **Customization:** Configure cache storage, expiration and request matching, or extend the library
+  with custom backends and serializers
 * **Compatibility:** Can be combined with other
   [popular libraries based on requests](https://requests-cache.readthedocs.io/en/stable/user_guide/compatibility.html)
 
