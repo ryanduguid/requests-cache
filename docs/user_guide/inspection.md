@@ -18,18 +18,19 @@ The following attributes are available on responses:
 :icon: file-code
 
 ```python
+>>> from datetime import timedelta
 >>> from requests_cache import CachedSession
 >>> session = CachedSession(expire_after=timedelta(days=1))
 
->>> # Placeholder attributes are added for non-cached responses
+>>> # Fresh responses also have cache metadata; timestamps here are illustrative
 >>> response = session.get('https://httpbin.org/get')
 >>> print(response.from_cache, response.created_at, response.expires, response.is_expired)
-False None None None
+False 2026-01-01 18:00:00+00:00 2026-01-02 18:00:00+00:00 False
 
->>> # These attributes will be populated for cached responses
+>>> # The cache hit shows the creation and expiry times saved with the response
 >>> response = session.get('https://httpbin.org/get')
 >>> print(response.from_cache, response.created_at, response.expires, response.is_expired)
-True 2021-01-01 18:00:00 2021-01-02 18:00:00 False
+True 2026-01-01 18:00:00+00:00 2026-01-02 18:00:00+00:00 False
 
 >>> # Print a response object to get general information about it
 >>> print(response)

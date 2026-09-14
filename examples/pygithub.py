@@ -96,7 +96,7 @@ def check_cache():
     print('\nExample cached request headers:')
     print(response.request.headers)
     for response in get_cache().responses.values():
-        assert 'Authorization' not in response.request.headers
+        assert response.request.headers.get('Authorization') in (None, 'REDACTED')
 
 
 def main():

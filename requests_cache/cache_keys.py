@@ -90,7 +90,9 @@ def create_key(
         # In both cases, fallback to SHA-256
         key = sha256()  # type: ignore
     for part in key_parts:
-        key.update(encode(part))
+        encoded = encode(part)
+        key.update(len(encoded).to_bytes(8, 'big'))
+        key.update(encoded)
     return key.hexdigest()
 
 
@@ -146,15 +148,12 @@ def normalize_headers(
     headers: MutableMapping[str, str],
     ignored_parameters: ParamList = None,
 ) -> CaseInsensitiveDict:
-    """Sort and filter request headers, and normalize minor variations in multi-value headers"""
-    headers = {k: decode(v) for (k, v) in headers.items()}
-    if ignored_parameters:
-        headers = filter_sort_dict(headers, ignored_parameters)
-    for k, v in headers.items():
-        if ',' in v:
-            values = [v.strip() for v in v.lower().split(',') if v.strip()]
-            headers[k] = ', '.join(sorted(values))
-    return CaseInsensitiveDict(headers)
+    """Redact header names without changing the case or order of their values."""
+    ignored_headers = {name.lower() for name in ignored_parameters or []}
+    return CaseInsensitiveDict(
+        (name, 'REDACTED' if name.lower() in ignored_headers else decode(value))
+        for name, value in headers.items()
+    )
 
 
 def normalize_url(url: str, ignored_parameters: ParamList) -> str:
@@ -204,7 +203,9 @@ def normalize_json_body(
     content_root_key: Optional[str] = None,
 ) -> Union[str, bytes]:
     """Normalize and filter a request body with serialized JSON data"""
-    if len(original_body) <= 2 or len(original_body) > MAX_NORM_BODY_SIZE:
+    if len(original_body) <= 2 or (
+        len(original_body) > MAX_NORM_BODY_SIZE and not ignored_parameters
+    ):
         return original_body
 
     try:
@@ -241,12 +242,8 @@ def redact_response(response: CachedResponse, ignored_parameters: ParamList) -> 
     if ignored_parameters:
         response.url = filter_url(response.url, ignored_parameters)
         response.request.url = filter_url(response.request.url, ignored_parameters)
-        response.headers = CaseInsensitiveDict(
-            filter_sort_dict(response.headers, ignored_parameters)
-        )
-        response.request.headers = CaseInsensitiveDict(
-            filter_sort_dict(response.request.headers, ignored_parameters)
-        )
+        response.headers = normalize_headers(response.headers, ignored_parameters)
+        response.request.headers = normalize_headers(response.request.headers, ignored_parameters)
         response.request.body = normalize_body(response.request, ignored_parameters)
     return response
 
@@ -263,7 +260,7 @@ def filter_sort_dict(
     ignored_parameters: ParamList = None,
 ) -> Dict[str, str]:
     # Note: Any ignored_parameters present will have their values replaced instead of removing the
-    # parameter, so the cache key will still match whether the parameter was present or not.
+    # parameter. Different ignored values match, but an absent parameter remains distinct.
     ignored_parameters = set(ignored_parameters or [])
     return {k: ('REDACTED' if k in ignored_parameters else v) for k, v in sorted(data.items())}
 
@@ -277,9 +274,8 @@ def filter_sort_multidict(
 
 
 def filter_sort_list(data: List, ignored_parameters: ParamList = None) -> List:
-    if not ignored_parameters:
-        return sorted(data)
-    return [k for k in sorted(data) if k not in set(ignored_parameters)]
+    ignored = set(ignored_parameters or [])
+    return [value for value in data if not isinstance(value, str) or value not in ignored]
 
 
 def filter_url(url: str, ignored_parameters: ParamList) -> str:

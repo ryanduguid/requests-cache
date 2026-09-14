@@ -18,7 +18,7 @@ from requests_cache.cache_keys import (
     redact_response,
 )
 
-CACHE_KEY = 'e25f7e6326966e82'
+CACHE_KEY = 'da1b904fcb218852'
 
 
 @pytest.mark.parametrize(
@@ -240,7 +240,7 @@ def test_normalize_headers__single_header_value_as_bytes():
 def test_normalize_headers__multiple_header_values_as_bytes():
     headers = {'Accept': b'gzip,  deflate,Venmo,  PayPal, '}
     norm_headers = normalize_headers(headers)
-    assert norm_headers == {'Accept': 'deflate, gzip, paypal, venmo'}
+    assert norm_headers == {'Accept': 'gzip,  deflate,Venmo,  PayPal, '}
 
 
 def test_normalize_headers__single_header_value_as_string():
@@ -252,7 +252,7 @@ def test_normalize_headers__single_header_value_as_string():
 def test_normalize_headers__multiple_header_values_as_string():
     headers = {'Accept': 'gzip,  deflate,Venmo,  PayPal, '}
     norm_headers = normalize_headers(headers)
-    assert norm_headers == {'Accept': 'deflate, gzip, paypal, venmo'}
+    assert norm_headers == {'Accept': 'gzip,  deflate,Venmo,  PayPal, '}
 
 
 def test_remove_ignored_headers__empty():

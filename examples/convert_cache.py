@@ -7,6 +7,7 @@ from requests import Response
 
 import requests_cache.backends.base
 from requests_cache import CachedResponse, CachedSession
+from requests_cache.models import CachedHTTPResponse
 
 
 class _Store:
@@ -22,8 +23,16 @@ def convert_old_response(cached_response, timestamp):
     temp_response = Response()
     for field in Response.__attrs__:
         setattr(temp_response, field, getattr(cached_response, field, None))
+    temp_response.request = cached_response.request
+    temp_response.raw = CachedHTTPResponse(
+        body=temp_response.content,
+        headers=temp_response.headers,
+        reason=temp_response.reason,
+        status=temp_response.status_code,
+        request_url=temp_response.url,
+    )
 
-    new_response = CachedResponse(temp_response)
+    new_response = CachedResponse.from_response(temp_response)
     new_response.created_at = timestamp
     return new_response
 

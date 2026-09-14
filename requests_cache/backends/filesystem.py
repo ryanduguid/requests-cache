@@ -84,6 +84,7 @@ class FileCache(BaseCache):
         """Clear the cache"""
         # FileDict.clear() removes the cache directory, including redirects.sqlite
         with self.lock:
+            self.redirects.close()
             self.responses.clear()
             self.redirects.init_db()
 

@@ -13,7 +13,7 @@ from os import unlink
 from os.path import getsize, isfile
 from pathlib import Path
 from tempfile import gettempdir
-from time import sleep, time
+from time import time
 from typing import Collection, Iterator, List, Optional, Tuple, Type
 
 from platformdirs import user_cache_dir
@@ -79,10 +79,13 @@ class SQLiteCache(BaseCache):
             super().clear()
         except Exception:
             logger.exception('Failed to clear cache')
-            if isfile(self.responses.db_path):
-                unlink(self.responses.db_path)
-            self.responses.init_db()
-            self.redirects.init_db()
+            with self.responses._lock:
+                self.responses.close()
+                self.redirects.close()
+                if isfile(self.responses.db_path):
+                    unlink(self.responses.db_path)
+                self.responses.init_db()
+                self.redirects.init_db()
 
     # A more efficient SQLite implementation of BaseCache.delete
     def delete(
@@ -297,17 +300,9 @@ class SQLiteDict(BaseStorage):
     @contextmanager
     def _acquire_sqlite_lock(self):
         with self._lock:
-            # Wait until we can acquire a write lock
-            while True:
-                try:
-                    self._connection.execute('BEGIN IMMEDIATE')
-                    self._active_transaction = True
-                    break
-                except sqlite3.OperationalError:
-                    # note that time.sleep can take 50us+:
-                    # https://github.com/python/cpython/issues/125997.
-                    sleep(1e-4)
-                    continue
+            # SQLite waits for its configured timeout and reports lock or other errors.
+            self._connection.execute('BEGIN IMMEDIATE')
+            self._active_transaction = True
             try:
                 yield
                 self._connection.commit()

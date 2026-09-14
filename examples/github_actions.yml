@@ -18,7 +18,9 @@ jobs:
         uses: actions/cache@v3
         with:
           path: example_cache.sqlite
-          key: none
+          key: requests-cache-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            requests-cache-${{ runner.os }}-
 
       # Install and run basic requests-cache example
       - run: pip install '.'

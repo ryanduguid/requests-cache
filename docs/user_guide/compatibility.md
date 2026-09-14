@@ -15,7 +15,12 @@ multiple Session-modifying libraries:
 ```
 
 ## Requests-HTML
-[requests-html](https://github.com/psf/requests-html) is one library that works with this method:
+[requests-html](https://github.com/psf/requests-html) is one library that works with this method.
+Install its HTML cleaner dependency explicitly when using current lxml releases:
+```bash
+pip install requests-html lxml_html_clean
+```
+
 ```python
 >>> import requests
 >>> from requests_cache import CacheMixin, install_cache
@@ -72,7 +77,7 @@ requests via the [pyrate-limiter](https://github.com/vutran1710/PyrateLimiter) l
 provides a mixin, but note that the inheritance order is important: If rate-limiting is applied
 _after_ caching, you get the added benefit of not counting cache hits against your rate limit.
 ```python
->>> from pyrate_limiter import RedisBucket, RequestRate, Duration
+>>> from pyrate_limiter import RedisBucket
 >>> from requests import Session
 >>> from requests_cache import CacheMixin, RedisCache
 >>> from requests_ratelimiter import LimiterMixin

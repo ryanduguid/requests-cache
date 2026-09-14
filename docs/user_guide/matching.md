@@ -77,11 +77,13 @@ isn't available:
 ```python
 >>> session = CachedSession(match_headers=['Accept'])
 >>> # These two requests will be sent and cached separately
->>> session.get('https://httpbin.org/headers', {'Accept': 'text/plain'})
->>> session.get('https://httpbin.org/headers', {'Accept': 'application/json'})
+>>> session.get('https://httpbin.org/headers', headers={'Accept': 'text/plain'})
+>>> session.get('https://httpbin.org/headers', headers={'Accept': 'application/json'})
 ```
 
 If you want to match _all_ request headers, you can use `match_headers=True`.
+Header names are case-insensitive. Header values retain their case, whitespace and order,
+because their meaning depends on the server and header field.
 
 
 (custom-matching)=
@@ -91,12 +93,12 @@ If you need more advanced behavior, you can implement your own custom request ma
 ### Cache Keys
 Request matching is accomplished using a **cache key**, which uniquely identifies a response in the
 cache based on request info. For example, the option `ignored_parameters=['foo']` works by excluding
-the `foo` request parameter from the cache key, meaning these three requests will all use the same
-cached response:
+the value of the `foo` request parameter from the cache key. Its presence still matters, so only
+the second and third requests below share a cached response:
 ```python
 >>> session = CachedSession(ignored_parameters=['foo'])
 >>> response_1 = session.get('https://example.com')          # cache miss
->>> response_2 = session.get('https://example.com?foo=bar')  # cache hit
+>>> response_2 = session.get('https://example.com?foo=bar')  # cache miss
 >>> response_3 = session.get('https://example.com?foo=qux')  # cache hit
 >>> assert response_2.cache_key == response_3.cache_key
 ```

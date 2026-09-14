@@ -5,10 +5,9 @@ e.g., testing with cached responses that were available at an arbitrary time in 
 """
 from datetime import UTC, datetime
 
-import requests
 import time_machine
 
-from requests_cache import CachedSession, set_response_defaults
+from requests_cache import CachedSession
 
 
 class BacktestCachedSession(CachedSession):
@@ -17,8 +16,8 @@ class BacktestCachedSession(CachedSession):
 
         # Response was cached after the (simulated) current time, so ignore it and send a new request
         if response.created_at and response.created_at > datetime.now(UTC):
-            new_response = requests.request(method, url, **kwargs)
-            return set_response_defaults(new_response)
+            with self.cache_disabled():
+                return super().request(method, url, **kwargs)
         else:
             return response
 

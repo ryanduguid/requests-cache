@@ -169,17 +169,19 @@ class TestSQLiteDict(BaseStorageTest):
             cache['key_1'] = 'value_1'
             assert mock_write.call_count == 1
 
-    def test_write_retry_acquire_lock(self):
-        """Acquiring the lock should retry BEGIN IMMEDIATE until it succeeds"""
+    def test_write_acquire_lock_failure(self):
+        """Propagate failure after SQLite finishes its configured wait."""
         cache = self.init_cache()
         with patch.object(cache, '_connection') as mock_connection:
-            mock_connection.execute.side_effect = [sqlite3.OperationalError] * 10 + [None]
-            with cache._acquire_sqlite_lock():
-                pass
+            mock_connection.execute.side_effect = sqlite3.OperationalError('database is locked')
+            with pytest.raises(sqlite3.OperationalError, match='database is locked'):
+                with cache._acquire_sqlite_lock():
+                    pass
             begin_calls = [
                 c for c in mock_connection.execute.call_args_list if 'BEGIN IMMEDIATE' in str(c)
             ]
-            assert len(begin_calls) == 11
+            assert len(begin_calls) == 1
+            assert cache._active_transaction is False
 
     def test_write__error(self):
         """Errors from write operations should propagate"""
@@ -354,6 +356,8 @@ class TestSQLiteCache(BaseCacheTest):
     def test_clear__file_already_deleted(self, mock_clear):
         session = self.init_session(clear=False)
         session.cache.responses['key_1'] = 'value_1'
+        session.cache.responses.close()
+        session.cache.redirects.close()
         os.unlink(session.cache.responses.db_path)
         session.cache.clear()
 

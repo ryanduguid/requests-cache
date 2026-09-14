@@ -32,6 +32,10 @@ This backend accepts any keyword arguments for {py:func}`sqlite3.connect`:
 >>> backend = SQLiteCache(timeout=30)
 ```
 
+`timeout` limits how long SQLite waits for a competing write lock, in seconds.
+If specified, `busy_timeout` overrides this wait in milliseconds. A lock that remains held
+raises `sqlite3.OperationalError` after that wait.
+
 ## Cache Files
 - By default, a file named `http_cache.sqlite` will be created in the current working directory
 - You can specify a different cache filename using the first positional argument to {py:class}`.SQLiteCache`
@@ -52,7 +56,7 @@ You can enable this (in "shared" memory mode) with the `use_memory` option:
 
 Or specify a memory URI with additional options:
 ```python
->>> backend = SQLiteCache(':file:memdb1?mode=memory')
+>>> backend = SQLiteCache('file:memdb1?mode=memory&cache=shared', uri=True)
 ```
 
 Or just `:memory:`, if you are only using the cache from a single thread:

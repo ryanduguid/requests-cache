@@ -57,10 +57,11 @@ To use a specific JSON library, use one of the following serializer objects:
 >>> session = CachedSession('my_cache', serializer=orjson_serializer)
 ```
 
-This will use [ultrajson](https://github.com/ultrajson/ultrajson) if installed, otherwise the stdlib
-`json` module will be used. You can install the optional dependencies for this serializer with:
+`serializer='json'` and `json_serializer` use the standard library `json` module.
+Install the alternative library before selecting its serializer:
 ```bash
-pip install requests-cache[json]
+pip install ujson  # For ujson_serializer
+pip install orjson  # For orjson_serializer
 ```
 
 ### YAML Serializer
@@ -198,12 +199,12 @@ Some other tools that could be used as a stage in a {py:class}`.SerializerPipeli
 
 Class                                             | loads     | dumps
 -----                                             | -----     | -----
-{py:mod}`codecs.* <.codecs>`                      | encode    | decode
-{py:mod}`.bz2`                                    | compress  | decompress
-{py:mod}`.gzip`                                   | compress  | decompress
-{py:mod}`.lzma`                                   | compress  | decompress
-{py:mod}`.zlib`                                   | compress  | decompress
-{py:mod}`.pickle`                                 | dumps     | loads
-{py:class}`itsdangerous.signer.Signer`            | sign      | unsign
+{py:mod}`.codecs`                                 | decode    | encode
+{py:mod}`.bz2`                                    | decompress | compress
+{py:mod}`.gzip`                                   | decompress | compress
+{py:mod}`.lzma`                                   | decompress | compress
+{py:mod}`.zlib`                                   | decompress | compress
+{py:mod}`.pickle`                                 | loads     | dumps
+{py:class}`itsdangerous.signer.Signer`            | unsign    | sign
 {py:class}`itsdangerous.serializer.Serializer`    | loads     | dumps
-{py:class}`cryptography.fernet.Fernet`            | encrypt   | decrypt
+{py:class}`cryptography.fernet.Fernet`            | decrypt   | encrypt
