@@ -61,17 +61,19 @@ And here is an example response:
 ```
 :::
 
-It is also possible query these responses with the [AWS CLI](https://aws.amazon.com/cli), for
-example:
+You can read these responses with the [AWS CLI](https://aws.amazon.com/cli).
+To scan the table:
 ```bash
-aws dynamodb query --table-name http_cache > responses.json
+aws dynamodb scan --table-name http_cache > responses.json
 ```
 
+To query one response, replace the example value with its cache key:
 ```bash
 aws dynamodb query \
     --table-name http_cache \
-    --key-condition-expression "namespace = :n1" \
-    --expression-attribute-values '{":n1": {"S": "responses"}}' \
+    --key-condition-expression "#cache_key = :key" \
+    --expression-attribute-names '{"#cache_key": "key"}' \
+    --expression-attribute-values '{":key": {"S": "example-cache-key"}}' \
     > responses.json
 ```
 

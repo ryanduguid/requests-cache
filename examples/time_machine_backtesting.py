@@ -3,12 +3,11 @@
 An example of using the [time-machine](https://github.com/adamchainz/time-machine) library for backtesting,
 e.g., testing with cached responses that were available at an arbitrary time in the past.
 """
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
-import requests
 import time_machine
 
-from requests_cache import CachedSession, set_response_defaults
+from requests_cache import CachedSession
 
 
 class BacktestCachedSession(CachedSession):
@@ -16,9 +15,9 @@ class BacktestCachedSession(CachedSession):
         response = super().request(method, url, **kwargs)
 
         # Response was cached after the (simulated) current time, so ignore it and send a new request
-        if response.created_at and response.created_at > datetime.now(UTC):
-            new_response = requests.request(method, url, **kwargs)
-            return set_response_defaults(new_response)
+        if response.created_at and response.created_at > datetime.now(timezone.utc):
+            with self.cache_disabled():
+                return super().request(method, url, **kwargs)
         else:
             return response
 

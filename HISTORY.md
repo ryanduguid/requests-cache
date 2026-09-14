@@ -1,5 +1,12 @@
 # History
 
+## Unreleased
+* Separate cache-key fields and preserve JSON array order and header values when matching.
+  Existing keys change: clear the cache or use `session.cache.recreate_keys()` to reuse stored responses.
+* Redact ignored header names regardless of case and ignored JSON fields above the normalisation size limit.
+  Existing cache files are not scrubbed automatically; clear or rewrite entries containing sensitive values.
+* Honour SQLite lock timeouts and close database connections before fallback cache clearing.
+
 ## 1.3.3 (2026-07-03)
 * Fix SQLite `vacuum()` not freeing disk space
 * Fix DynamoDB item enumeration when the table exceeds 1MB
@@ -12,7 +19,7 @@
 `Authorization` + `Vary: Authorization`), always consider it a cache miss
 * Ignore + redact some additional common authentication headers + params by default
 
-## 1.3.1 (2025-03-03)
+## 1.3.1 (2026-03-04)
 * Add support for multiple response variations based on `Vary`
 * Fix overwriting headers after revalidation in `read_only` mode
 * Add tests for python 3.15 (alpha)

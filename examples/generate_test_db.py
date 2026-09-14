@@ -26,7 +26,8 @@ N_INVALID_RESPONSES = 10
 BASE_RESPONSE = requests.get('https://httpbin.org/get')
 HTTPBIN_EXTRA_ENDPOINTS = [
     'anything',
-    'bytes/1024' 'cookies',
+    'bytes/1024',
+    'cookies',
     'ip',
     'redirect/5',
     'stream-bytes/1024',

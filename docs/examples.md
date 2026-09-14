@@ -208,7 +208,9 @@ Key points:
 * Create the cache file within the CI project directory
 * You can use [actions/cache](https://github.com/actions/cache) to persist the cache file across
   workflow runs
-    * You can use a constant cache key within this action to let requests-cache handle expiration
+    * Use a new action cache key for each run and restore the latest matching cache.
+      An exact key match restores an immutable snapshot and does not save subsequent changes.
+      requests-cache handles response expiry within each restored database.
 
 
 :::{dropdown} Example

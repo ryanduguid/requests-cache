@@ -51,11 +51,11 @@ using a expiration value of `requests_cache.DO_NOT_CACHE` for non-matching reque
 >>> session = CachedSession(urls_expire_after=urls_expire_after)
 ```
 
-Note that the catch-all rule above (`'*'`) will behave the same as setting the session-level
-expiration to `0`:
+The catch-all rule above (`'*'`) is equivalent to setting the session-level
+expiration to `DO_NOT_CACHE`:
 ```python
 >>> urls_expire_after = {'*.site_1.com': 30, 'site_2.com/static': -1}
->>> session = CachedSession(urls_expire_after=urls_expire_after, expire_after=0)
+>>> session = CachedSession(urls_expire_after=urls_expire_after, expire_after=DO_NOT_CACHE)
 ```
 
 (custom-filtering)=

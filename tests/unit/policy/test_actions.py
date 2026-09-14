@@ -270,12 +270,12 @@ def test_update_from_cached_response__stale_while_revalidate():
             {'Accept-Encoding': 'gzip,deflate'},
             True,
         ),
-        # Only basic header normalization is done in create_key() (whitespace, case, order)
+        # Header values retain their case, whitespace and order.
         (
             {'Vary': 'Accept-Encoding'},
             {'Accept-Encoding': 'gzip,deflate'},
             {'Accept-Encoding': 'dEfLaTe,  GZIP, '},
-            True,
+            False,
         ),
         (
             {'Vary': 'Accept-Encoding'},

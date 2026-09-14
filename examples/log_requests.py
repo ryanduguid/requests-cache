@@ -9,7 +9,7 @@ from unittest.mock import patch
 import requests
 
 from requests_cache import CachedSession
-from requests_cache.session import OriginalSession, set_response_defaults
+from requests_cache.session import OriginalSession
 
 basicConfig(level='INFO')
 logger = getLogger('requests_cache.examples')
@@ -20,12 +20,12 @@ logger = getLogger('requests_cache.examples')
 @contextmanager
 def log_requests():
     """Context manager that mocks and logs all non-cached requests"""
-    real_response = set_response_defaults(requests.get('https://httpbin.org/get'))
+    real_response = requests.get('https://httpbin.org/get')
     with patch.object(OriginalSession, 'send', return_value=real_response) as mock_send:
         session = CachedSession('cache-test', backend='sqlite')
         session.cache.clear()
         yield session
-        cached_responses = session.cache.responses.values()
+        cached_responses = list(session.cache.responses.values())
 
     logger.debug('All calls to Session._request():')
     logger.debug(mock_send.mock_calls)
