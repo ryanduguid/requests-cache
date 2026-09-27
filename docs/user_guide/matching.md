@@ -91,6 +91,9 @@ Byte-valued headers use the same Latin-1 mapping as Requests. Clear older cache 
 with non-ASCII byte headers, since their original bytes cannot be recovered reliably.
 `Vary: Cookie` compares the exact sent header, including an explicit header that overrides a cookie jar.
 Use `match_headers=['Cookie']` to retain different Cookie variants separately.
+For responses with redirect history and `Vary: Cookie`, only a request to the final URL can reuse
+the cached response directly. Requests through redirect aliases must follow the redirects again;
+cache-only requests to those aliases return 504.
 If a nominated value or the `Vary` field itself was redacted, the cached response cannot be reused.
 
 

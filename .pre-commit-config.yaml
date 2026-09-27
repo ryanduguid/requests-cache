@@ -32,6 +32,8 @@ repos:
     rev: v0.1
     hooks:
       - id: xenon
+        # The average must cover all files, independent of parallel batch sizes.
+        require_serial: true
         args: [--max-average=A, --max-modules=B, --max-absolute=C]
   - repo: https://github.com/crate-ci/typos
     rev: v1.48.0

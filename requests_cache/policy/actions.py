@@ -351,7 +351,7 @@ class CacheActions(RichMixin):
             return False
         vary_request = (
             cached_response.history[-1].request
-            if cached_response.history
+            if cached_response.history and 'cookie' not in match_headers
             else cached_response.request
         )
 
@@ -360,6 +360,11 @@ class CacheActions(RichMixin):
 
         # The prepared Cookie header records what was sent; the jar may contain unsent cookies.
         if 'cookie' in match_headers:
+            # ponytail: Alias hits need redirect-aware Cookie validation; fetch the chain instead.
+            if cached_response.history and (
+                not vary_request.url or self._request.url != vary_request.url
+            ):
+                return False
             if not self._cookies_match(vary_request):
                 logger.debug('Failed Vary check: cookies do not match')
                 return False

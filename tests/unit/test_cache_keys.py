@@ -18,6 +18,7 @@ from requests_cache.cache_keys import (
     redact_response,
 )
 from requests_cache.models import CachedRequest, CachedResponse
+from requests_cache.serializers import init_serializer
 
 CACHE_KEY = 'da1b904fcb218852'
 
@@ -100,6 +101,53 @@ def test_redact_response__detached_request_snapshots(location):
     assert request.cookies['theme'] == 'light'
     assert 'fabricated' in request.url
     assert b'fabricated' in request.body
+
+
+@pytest.mark.parametrize(
+    'value', [bytes([value]) + b'fixture' for value in [28, 29, 30, 31, 133, 160]]
+)
+@pytest.mark.parametrize('serializer_name', [None, 'json', 'yaml', 'pickle'])
+@pytest.mark.parametrize('in_history', [False, True])
+def test_redact_response__next_byte_header(value, serializer_name, in_history):
+    """Redaction must retain valid byte headers in a prepared next request."""
+    request = Request('GET', 'https://example.com/start').prepare()
+    following = Request(
+        'GET',
+        'https://example.com/final',
+        headers={'X-Variant': value, 'X-Private': 'fabricated', 'Content-Type': 'text/plain'},
+    ).prepare()
+    response = CachedResponse(
+        url=request.url,
+        status_code=302,
+        headers={'Location': following.url},
+        request=CachedRequest.from_request(request),
+        next=CachedRequest.from_request(following),
+    )
+    if in_history:
+        response = CachedResponse(
+            url=following.url,
+            request=CachedRequest.from_request(following),
+            status_code=200,
+            history=[response],
+        )
+
+    stored = CachedResponse.from_response(response)
+    redact_response(stored, ['X-Private'])
+    if serializer_name:
+        if serializer_name == 'yaml':
+            pytest.importorskip('yaml')
+        serializer = init_serializer(serializer_name, decode_content=False)
+        stored = serializer.loads(serializer.dumps(stored))
+    if in_history:
+        stored = stored.history[0]
+
+    for _ in range(2):
+        assert stored.next.headers['X-Variant'] == value
+        assert stored.next.headers['X-Private'] == 'REDACTED'
+        assert stored.next.headers['Content-Type'] == 'text/plain'
+    assert stored._next.headers['X-Variant'] == value.decode('latin-1')
+    assert following.headers['X-Variant'] == value
+    assert following.headers['X-Private'] == 'fabricated'
 
 
 @pytest.mark.parametrize(
