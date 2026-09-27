@@ -77,7 +77,6 @@ Example with all LRU-related options:
 ...       sync_index=True,               # Check for manual changes on disk since last use
 ... )
 ```
-```
 
 ## Performance and Limitations
 
