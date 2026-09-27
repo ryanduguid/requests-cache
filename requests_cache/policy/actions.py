@@ -552,12 +552,12 @@ def _has_complete_identity(
         (body and content_type == 'REDACTED')
         or (
             is_json_content_type(content_type.split(';', 1)[0].lower())
-            and _has_ambiguous_json_array(body)
+            and _has_ambiguous_json_body(body)
         )
     )
 
 
-def _has_ambiguous_json_array(body: bytes) -> bool:
+def _has_ambiguous_json_body(body: bytes) -> bool:
     try:
         data = json.loads(body, parse_int=str, parse_float=str)
     except RecursionError:
@@ -565,9 +565,21 @@ def _has_ambiguous_json_array(body: bytes) -> bool:
     except ValueError:
         return False
     # A previous content_root_key can name any immediate member, even if settings later change.
-    return isinstance(data, list) or (
+    if isinstance(data, list) or (
         isinstance(data, dict) and any(isinstance(value, list) for value in data.values())
-    )
+    ):
+        return True
+    pending = [data]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str) and 'REDACTED' in value:
+            return True
+        if isinstance(value, dict):
+            pending.extend(value)
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return False
 
 
 def _log_cache_criteria(operation: str, criteria: Dict):

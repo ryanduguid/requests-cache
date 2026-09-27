@@ -425,6 +425,55 @@ def test_legacy_json_parser_limit_is_a_cache_miss(monkeypatch, cutoff, redacted,
     assert not actions.send_request and not actions.resend_request
 
 
+@pytest.mark.parametrize('cutoff', [10, 1024])
+@pytest.mark.parametrize('redacted', [None, ['unknown'], ['unknown', 'header:x-unused'], []])
+@pytest.mark.parametrize('operand', ['current', 'cached'])
+@pytest.mark.parametrize(
+    'body',
+    [
+        rb'"\u0052EDACTED"',
+        rb'{"value":"\u0052EDACTED"}',
+        rb'{"\u0052EDACTED":1}',
+        rb'{"outer":{"value":"prefix\u0052EDACTEDsuffix"}}',
+        rb'{"outer":{"items":[0,{"value":"\u0052EDACTED"}]}}',
+    ],
+)
+def test_legacy_escaped_json_markers_are_unavailable(monkeypatch, cutoff, redacted, operand, body):
+    monkeypatch.setattr(cache_keys, 'MAX_NORM_BODY_SIZE', cutoff)
+    current = Request(
+        'POST',
+        'https://example.com/',
+        data=body,
+        headers={'Content-Type': 'application/json', 'Cookie': 'fixture'},
+    ).prepare()
+    cached = CachedRequest.from_request(current)
+    legacy = cached.copy()
+    legacy.redacted_fields = redacted
+    if operand == 'current':
+        current = legacy.prepare().copy().copy()
+    else:
+        cached = legacy
+    key = create_key(current)
+    assert key == create_key(cached)
+    response = CachedResponse(
+        url=current.url,
+        request=cached,
+        status_code=200,
+        headers={'Vary': 'Cookie'},
+        history=[CachedResponse(url=current.url, request=cached.copy(), status_code=307)],
+    )
+    actions = CacheActions.from_request(
+        key,
+        current,
+        CacheSettings(only_if_cached=True, ignored_parameters=[], allowable_methods=('POST',)),
+    )
+
+    actions.update_from_cached_response(response, create_key)
+
+    assert actions.error_504 is (redacted is None or 'unknown' in redacted)
+    assert not actions.send_request and not actions.resend_request
+
+
 @pytest.mark.parametrize('normalise_first', [False, True])
 def test_normalisation_distinguishes_legacy_and_fresh_requests(normalise_first):
     prepared = Request('POST', 'https://example.com/', json=['kept']).prepare()
