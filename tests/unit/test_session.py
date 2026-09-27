@@ -1061,6 +1061,39 @@ def test_request_only_if_cached__secondary_variant(mock_session, expired_primary
     assert mock_session.mock_adapter.call_count == 2
 
 
+@pytest.mark.parametrize(
+    'vary, first_kwargs, next_kwargs',
+    [
+        ('Cookie', {'cookies': {'theme': 'light'}}, {'cookies': {'theme': 'dark'}}),
+        ('*', {}, {}),
+        (
+            'Authorization',
+            {'headers': {'Authorization': 'fabricated-a'}},
+            {'headers': {'Authorization': 'fabricated-b'}},
+        ),
+    ],
+)
+def test_request_only_if_cached__vary_miss_preserves_filtered_entry(
+    mock_session, vary, first_kwargs, next_kwargs
+):
+    """A synthetic 504 cannot evict a valid entry belonging to another variant."""
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Authorization']
+    mock_session.mock_adapter.register_uri(
+        'GET', MOCKED_URL, headers={'Vary': vary}, text='first variant'
+    )
+    first = mock_session.get(MOCKED_URL, **first_kwargs)
+    mock_session.settings.filter_fn = lambda response: response.status_code == 200
+
+    response = mock_session.get(MOCKED_URL, only_if_cached=True, **next_kwargs)
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+    saved = mock_session.cache.get_response(first.cache_key)
+    assert saved is not None
+    assert saved.text == 'first variant'
+
+
 @pytest.mark.parametrize('secondary_state', ['expired', 'wildcard'])
 def test_request_only_if_cached__secondary_variant_rejected(mock_session, secondary_state):
     mock_session.trust_env = False

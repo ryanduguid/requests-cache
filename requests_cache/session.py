@@ -257,7 +257,11 @@ class CacheMixin(MIXIN_BASE):
             response = cached_response  # type: ignore  # Guaranteed to be non-None by this point
 
         # If the request has been filtered out and was previously cached, delete it
-        if self.settings.filter_fn is not None and not self.settings.filter_fn(response):
+        if (
+            not actions.error_504
+            and self.settings.filter_fn is not None
+            and not self.settings.filter_fn(response)
+        ):
             logger.debug(f'Deleting filtered response for URL: {response.url}')
             self.cache.delete(actions.cache_key)
             return response
