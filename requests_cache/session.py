@@ -129,6 +129,13 @@ class CacheMixin(MIXIN_BASE):
 
     # Wrapper methods to add return type hints
     def get(self, url: str, params=None, **kwargs) -> AnyResponse:  # type: ignore
+        """Get a response, using the cache when permitted.
+
+        Args:
+            url: URL to request
+            params: Parameters to add to the URL's query string
+            **kwargs: Additional arguments for :meth:`request`
+        """
         kwargs.setdefault('allow_redirects', True)
         return self.request('GET', url, params=params, **kwargs)
 

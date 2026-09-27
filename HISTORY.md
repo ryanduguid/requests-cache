@@ -126,7 +126,7 @@
 
 ⚠️ **Deprecations & removals:**
 * Drop support for python 3.7
-* Remove methods [deprecated in 1.0](#deprecations-1-0) from `CachedSession` and `BaseCache`
+* Remove methods <a href="#deprecations-1-0">deprecated in 1.0</a> from `CachedSession` and `BaseCache`
 
 🕗 **Expiration & headers:**
 * Add support for `X-HTTP-Method-Override` and other headers that can override request method

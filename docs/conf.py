@@ -15,6 +15,10 @@ from pathlib import Path
 from shutil import copy
 from importlib.metadata import version as pkg_version
 
+from sphinx.util.typing import stringify_annotation
+
+from requests_cache.models import AnyPreparedRequest, AnyRequest
+
 DOCS_DIR = Path(__file__).parent.absolute()
 PROJECT_DIR = DOCS_DIR.parent
 PACKAGE_DIR = PROJECT_DIR / 'requests_cache'
@@ -44,7 +48,6 @@ extensions = [
     'sphinx.ext.intersphinx',
     'sphinx.ext.napoleon',
     'sphinx.ext.viewcode',
-    'sphinx_autodoc_typehints',
     'sphinx_automodapi.automodapi',
     'sphinx_automodapi.smart_resolver',
     'sphinx_copybutton',
@@ -77,7 +80,7 @@ exclude_patterns = [
 intersphinx_mapping = {
     'attrs': ('https://www.attrs.org/en/stable/', None),
     'boto3': ('https://boto3.amazonaws.com/v1/documentation/api/latest/', None),
-    'botocore': ('https://botocore.readthedocs.io/en/latest/', None),
+    'botocore': ('https://docs.aws.amazon.com/botocore/latest/', None),
     'cattrs': ('https://cattrs.readthedocs.io/en/latest/', None),
     'cryptography': ('https://cryptography.io/en/latest/', None),
     'itsdangerous': ('https://itsdangerous.palletsprojects.com/en/2.0.x/', None),
@@ -106,7 +109,13 @@ autosectionlabel_prefix_document = True
 
 # Move type hint info to function description instead of signature
 autodoc_typehints = 'description'
-always_document_param_types = True
+autodoc_type_aliases = {
+    'AnyPreparedRequest': stringify_annotation(AnyPreparedRequest, mode='fully-qualified'),
+    'AnyRequest': stringify_annotation(AnyRequest, mode='fully-qualified'),
+    'CacheActions': 'requests_cache.policy.actions.CacheActions',
+    'CachedRequest': 'requests_cache.models.request.CachedRequest',
+    'CachedResponse': 'requests_cache.models.response.CachedResponse',
+}
 
 # Use apidoc to auto-generate rst sources
 apidoc_module_dir = str(PACKAGE_DIR)

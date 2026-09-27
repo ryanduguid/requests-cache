@@ -17,7 +17,7 @@ logger = getLogger(__name__)
 
 @define(repr=False, getstate_setstate=False)
 class CachedRequest(RichMixin):
-    """A serializable dataclass that emulates :py:class:`requests.PreparedResponse`"""
+    """A serialisable dataclass that emulates :py:class:`requests.PreparedRequest`"""
 
     body: bytes = field(default=None, converter=encode)
     cookies: RequestsCookieJar = field(factory=RequestsCookieJar)

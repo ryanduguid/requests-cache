@@ -1215,7 +1215,6 @@ docs = [
     { name = "myst-parser", marker = "python_full_version >= '3.11'" },
     { name = "sphinx", marker = "python_full_version >= '3.11'" },
     { name = "sphinx-autobuild", marker = "python_full_version >= '3.11'" },
-    { name = "sphinx-autodoc-typehints", marker = "python_full_version >= '3.11'" },
     { name = "sphinx-automodapi", marker = "python_full_version >= '3.11'" },
     { name = "sphinx-copybutton", marker = "python_full_version >= '3.11'" },
     { name = "sphinx-design", marker = "python_full_version >= '3.11'" },
@@ -1276,7 +1275,6 @@ docs = [
     { name = "myst-parser", marker = "python_full_version >= '3.11'", specifier = ">=3.0" },
     { name = "sphinx", marker = "python_full_version >= '3.11'", specifier = "~=8.2.3" },
     { name = "sphinx-autobuild", marker = "python_full_version >= '3.11'", specifier = "~=2024.10" },
-    { name = "sphinx-autodoc-typehints", marker = "python_full_version >= '3.11'", specifier = "~=3.2" },
     { name = "sphinx-automodapi", marker = "python_full_version >= '3.11'", specifier = "~=0.20" },
     { name = "sphinx-copybutton", marker = "python_full_version >= '3.11'", specifier = ">=0.5" },
     { name = "sphinx-design", marker = "python_full_version >= '3.11'", specifier = ">=0.6" },
@@ -1438,18 +1436,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a5/2c/155e1de2c1ba96a72e5dba152c509a8b41e047ee5c2def9e9f0d812f8be7/sphinx_autobuild-2024.10.3.tar.gz", hash = "sha256:248150f8f333e825107b6d4b86113ab28fa51750e5f9ae63b59dc339be951fb1", size = 14023, upload-time = "2024-10-02T23:15:30.172Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/18/c0/eba125db38c84d3c74717008fd3cb5000b68cd7e2cbafd1349c6a38c3d3b/sphinx_autobuild-2024.10.3-py3-none-any.whl", hash = "sha256:158e16c36f9d633e613c9aaf81c19b0fc458ca78b112533b20dafcda430d60fa", size = 11908, upload-time = "2024-10-02T23:15:28.739Z" },
-]
-
-[[package]]
-name = "sphinx-autodoc-typehints"
-version = "3.5.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "sphinx" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/34/4f/4fd5583678bb7dc8afa69e9b309e6a99ee8d79ad3a4728f4e52fd7cb37c7/sphinx_autodoc_typehints-3.5.2.tar.gz", hash = "sha256:5fcd4a3eb7aa89424c1e2e32bedca66edc38367569c9169a80f4b3e934171fdb", size = 37839, upload-time = "2025-10-16T00:50:15.743Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/05/f2/9657c98a66973b7c35bfd48ba65d1922860de9598fbb535cd96e3f58a908/sphinx_autodoc_typehints-3.5.2-py3-none-any.whl", hash = "sha256:0accd043619f53c86705958e323b419e41667917045ac9215d7be1b493648d8c", size = 21184, upload-time = "2025-10-16T00:50:13.973Z" },
 ]
 
 [[package]]
