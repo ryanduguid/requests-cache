@@ -5,7 +5,7 @@
    :nosignatures:
 """
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from logging import getLogger
 from os import makedirs
 from pathlib import Path
@@ -306,9 +306,11 @@ class LRUFileDict(FileDict):
 
     def clear(self):
         """Clear the cache directory and LRU index."""
-        super().clear()
-        self.lru_index.clear()
-        self._lru_initialized = False
+        with self._lock, self.lru_index._lock:
+            self.lru_index.close()
+            super().clear()
+            self.lru_index.clear()
+            self._lru_initialized = False
 
     def size(self) -> int:
         """Return the size of the database, in bytes"""
@@ -400,10 +402,13 @@ class LRUDict(SQLiteDict):
             raise KeyError
 
     def __getitem__(self, key) -> int:
-        with self.connection() as con:
-            # Using placeholders here with python 3.12+ and concurrency results in the error:
-            # sqlite3.InterfaceError: bad parameter or other API misuse
-            row = con.execute(f"SELECT size FROM {self.table_name} WHERE key='{key}'").fetchone()
+        with (
+            self.connection() as con,
+            closing(
+                con.execute(f'SELECT size FROM {self.table_name} WHERE key=?', (key,))
+            ) as cursor,
+        ):
+            row = cursor.fetchone()
             if not row:
                 raise KeyError(key)
             return row[0]
@@ -439,11 +444,14 @@ class LRUDict(SQLiteDict):
             cur = con.execute(
                 f"""
                 WITH ordered AS (
-                    SELECT key, size, access_time, SUM(size) OVER (ORDER BY access_time) AS running_total
+                    SELECT key, size, access_time,
+                        SUM(size) OVER (
+                            ORDER BY access_time, key ROWS UNBOUNDED PRECEDING
+                        ) AS running_total
                     FROM {self.table_name}
                 )
                 SELECT * FROM ordered WHERE running_total - size < ?
-                ORDER BY access_time;
+                ORDER BY access_time, key;
                 """,
                 (total_size,),
             )
@@ -463,13 +471,20 @@ class LRUDict(SQLiteDict):
         if key not in ['access_time', 'size', 'key']:
             raise ValueError(f'Invalid sort key: {key}')
         direction = 'DESC' if reversed else 'ASC'
-        limit_expr = f'LIMIT {limit}' if limit else ''
+        limit_expr = 'LIMIT ?' if limit is not None else ''
+        params = (limit,) if limit is not None else ()
 
-        with self.connection() as con:
-            for row in con.execute(
-                f'SELECT key FROM {self.table_name} ORDER BY {key} {direction} {limit_expr}',
-            ):
-                yield row[0]
+        with (
+            self.connection() as con,
+            closing(
+                con.execute(
+                    f'SELECT key FROM {self.table_name} ORDER BY {key} {direction} {limit_expr}',
+                    params,
+                )
+            ) as cursor,
+        ):
+            keys = [row[0] for row in cursor]
+        yield from keys
 
     def total_size(self) -> int:
         with self.connection() as con:

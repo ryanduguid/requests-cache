@@ -478,9 +478,13 @@ class SQLiteDict(BaseStorage):
             ) as cursor,
         ):
             keys = cursor.fetchall()
+            with closing(con.execute('PRAGMA encoding')) as encoding_cursor:
+                encoding = encoding_cursor.fetchone()[0]
+            if isinstance(encoding, bytes):
+                encoding = encoding.decode('ascii')
         for stored_key, raw_key, is_text in keys:
             # Keep lookup identity independent of connection text factories and type converters.
-            lookup_key = raw_key.decode('utf-8') if is_text else raw_key
+            lookup_key = raw_key.decode(encoding) if is_text else raw_key
             try:
                 value = self._get_raw(lookup_key)
             except KeyError:

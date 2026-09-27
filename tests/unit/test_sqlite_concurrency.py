@@ -7,7 +7,7 @@ from threading import Barrier, Event
 
 import pytest
 
-from requests_cache.backends.sqlite import SQLiteDict
+from requests_cache.backends.sqlite import SQLiteCache, SQLiteDict
 from requests_cache.models import CachedResponse
 
 
@@ -394,5 +394,63 @@ def test_repeated_popitem_does_not_rescan_remaining_keys(tmp_path):
         assert rows_read <= 4 * len(values)
         with pytest.raises(KeyError):
             cache.popitem()
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize('encoding', ['UTF-8', 'UTF-16le', 'UTF-16be'])
+@pytest.mark.parametrize('conversion', ['default', 'bytes', 'declared'])
+def test_sorted_key_identity_uses_database_encoding(tmp_path, monkeypatch, encoding, conversion):
+    path = tmp_path / 'encoded.sqlite'
+    with sqlite3.connect(path) as connection:
+        connection.execute(f"PRAGMA encoding='{encoding}'")
+        connection.execute('CREATE TABLE bootstrap (value TEXT)')
+    connection.close()
+
+    class ByteTextConnection(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.text_factory = bytes
+
+    kwargs = {}
+    if conversion == 'bytes':
+        kwargs['factory'] = ByteTextConnection
+    elif conversion == 'declared':
+        monkeypatch.setitem(sqlite3.converters, 'TEXT', lambda value: b'converted:' + value)
+        kwargs['detect_types'] = sqlite3.PARSE_DECLTYPES
+    cache = SQLiteDict(path, **kwargs)
+    try:
+        for key, content in [
+            ('aa', b'first'),
+            ('\u6161', b'second'),
+            ('\u00e9', b'third'),
+            (b'aa', b'blob'),
+        ]:
+            cache[key] = CachedResponse(status_code=200, content=content)
+        with cache.connection() as connection:
+            rows = connection.execute('SELECT key,value FROM http_cache ORDER BY key').fetchall()
+        expected = [(key, cache.serializer.loads(value).content) for key, value in rows]
+        assert [
+            (response.cache_key, response.content) for response in cache.sorted(key='key')
+        ] == expected
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize('encoding', ['UTF-16le', 'UTF-16be'])
+def test_reset_expiration_preserves_utf16_response_bodies(tmp_path, encoding):
+    path = tmp_path / 'expiration.sqlite'
+    with sqlite3.connect(path) as connection:
+        connection.execute(f"PRAGMA encoding='{encoding}'")
+        connection.execute('CREATE TABLE bootstrap (value TEXT)')
+    connection.close()
+    cache = SQLiteCache(path)
+    expected = {'aa': b'first', '\u6161': b'second'}
+    try:
+        for key, content in expected.items():
+            cache.responses[key] = CachedResponse(status_code=200, content=content)
+        assert {response.cache_key: response.content for response in cache.filter()} == expected
+        cache.reset_expiration(60)
+        assert {key: cache.responses[key].content for key in expected} == expected
     finally:
         cache.close()
