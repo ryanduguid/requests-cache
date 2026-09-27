@@ -399,7 +399,7 @@ def test_repeated_popitem_does_not_rescan_remaining_keys(tmp_path):
 
 
 @pytest.mark.parametrize('encoding', ['UTF-8', 'UTF-16le', 'UTF-16be'])
-@pytest.mark.parametrize('conversion', ['default', 'bytes', 'declared'])
+@pytest.mark.parametrize('conversion', ['default', 'bytes', 'declared', 'transforming', 'rows'])
 def test_sorted_key_identity_uses_database_encoding(tmp_path, monkeypatch, encoding, conversion):
     path = tmp_path / 'encoded.sqlite'
     with sqlite3.connect(path) as connection:
@@ -420,6 +420,15 @@ def test_sorted_key_identity_uses_database_encoding(tmp_path, monkeypatch, encod
         kwargs['detect_types'] = sqlite3.PARSE_DECLTYPES
     cache = SQLiteDict(path, **kwargs)
     try:
+        with cache.connection() as connection:
+            if conversion == 'transforming':
+                connection.text_factory = lambda raw: raw.decode('utf-8') + ' suffix'
+            elif conversion == 'rows':
+                connection.row_factory = lambda cursor, row: tuple(
+                    value + ' suffix' if isinstance(value, str) else value for value in row
+                )
+            text_factory = connection.text_factory
+            row_factory = connection.row_factory
         for key, content in [
             ('aa', b'first'),
             ('\u6161', b'second'),
@@ -433,6 +442,9 @@ def test_sorted_key_identity_uses_database_encoding(tmp_path, monkeypatch, encod
         assert [
             (response.cache_key, response.content) for response in cache.sorted(key='key')
         ] == expected
+        with cache.connection() as connection:
+            assert connection.text_factory is text_factory
+            assert connection.row_factory is row_factory
     finally:
         cache.close()
 
@@ -452,5 +464,34 @@ def test_reset_expiration_preserves_utf16_response_bodies(tmp_path, encoding):
         assert {response.cache_key: response.content for response in cache.filter()} == expected
         cache.reset_expiration(60)
         assert {key: cache.responses[key].content for key in expected} == expected
+    finally:
+        cache.close()
+
+
+def test_encoding_failure_restores_text_factory(tmp_path):
+    class FailingCursor(sqlite3.Cursor):
+        def execute(self, sql, *args):
+            if sql == 'PRAGMA encoding':
+                raise RuntimeError('Fixture metadata failure')
+            return super().execute(sql, *args)
+
+    class FailingConnection(sqlite3.Connection):
+        def cursor(self, *args, **kwargs):
+            return super().cursor(factory=FailingCursor)
+
+    cache = SQLiteDict(tmp_path / 'metadata-failure.sqlite', factory=FailingConnection)
+    try:
+        cache['key'] = 'fixture'
+        with cache.connection() as connection:
+
+            def factory(raw):
+                return raw.decode('utf-8') + ' suffix'
+
+            connection.text_factory = factory
+        with pytest.raises(RuntimeError, match='Fixture metadata failure'):
+            list(cache.sorted())
+        with cache.connection() as connection:
+            assert connection.text_factory is factory
+        assert cache['key'] == 'fixture'
     finally:
         cache.close()

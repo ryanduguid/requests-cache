@@ -5,8 +5,9 @@
   Release iterator cursors before yielding and preserve false-valued cached responses and zero limits.
   Roll back failed transactions, report their errors and reject transaction-breaking lifecycle calls.
   Bind lookup keys and treat truncated pickles as invalid cache entries.
-  Close filesystem LRU metadata before deleting its directory and release its iterator cursors.
-  Preserve UTF-16 database key identity and evict enough entries when access timestamps tie.
+  Preserve shared filesystem metadata files when clearing caches and reset redirect entries.
+  Exclude metadata from response paths, keep one LRU size counter and release iterator cursors.
+  Preserve database key identity with UTF-16 and custom factories; evict enough entries when timestamps tie.
 * Preserve query and form values, empty fields and percent-encoded bytes during normalisation.
   Keep literal plus signs distinct from spaces and avoid normalising query values twice.
   Default keys use a new namespace: start with a fresh cache, including redirect aliases.
