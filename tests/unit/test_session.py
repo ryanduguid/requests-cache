@@ -1146,6 +1146,49 @@ def test_request_only_if_cached__filters_matching_entry(mock_session, variant, e
         assert mock_session.cache.get_response(primary.cache_key) is not None
 
 
+@pytest.mark.parametrize('secondary', [False, True])
+@pytest.mark.parametrize('read_only', [False, True])
+@pytest.mark.parametrize('only_if_cached', [False, True])
+def test_filtered_vary_miss__response_hook_once(mock_session, secondary, read_only, only_if_cached):
+    """Preserving a rejected variant does not repeat network response hooks."""
+    mock_session.trust_env = False
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        MOCKED_URL,
+        headers={'Vary': 'Accept-Language' if secondary else '*'},
+        text='primary',
+    )
+    first = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'})
+    selected = first
+    if secondary:
+        mock_session.mock_adapter.register_uri(
+            'GET', MOCKED_URL, headers={'Vary': '*'}, text='secondary'
+        )
+        selected = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'fr'})
+    calls_before = mock_session.mock_adapter.call_count
+    mock_session.settings.read_only = read_only
+    mock_session.settings.filter_fn = lambda response: False
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, text='not cached')
+    hook_calls = []
+
+    def hook(response, *args, **kwargs):
+        hook_calls.append(response)
+        return response
+
+    response = mock_session.get(
+        MOCKED_URL,
+        headers={'Accept-Language': 'fr' if secondary else 'en'},
+        only_if_cached=only_if_cached,
+        hooks={'response': hook},
+    )
+
+    assert response.status_code == (504 if only_if_cached else 200)
+    assert mock_session.mock_adapter.call_count == calls_before + (not only_if_cached)
+    assert len(hook_calls) == 1
+    assert mock_session.cache.get_response(selected.cache_key).text == selected.text
+    assert mock_session.cache.get_response(first.cache_key).text == 'primary'
+
+
 @pytest.mark.parametrize('secondary_state', ['expired', 'wildcard'])
 def test_request_only_if_cached__secondary_variant_rejected(mock_session, secondary_state):
     mock_session.trust_env = False

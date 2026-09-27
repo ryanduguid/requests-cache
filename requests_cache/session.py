@@ -258,14 +258,13 @@ class CacheMixin(MIXIN_BASE):
         preserve_vary_candidate = actions.vary_mismatch and (
             actions.error_504 or actions.skip_write
         )
-        if (
-            not preserve_vary_candidate
-            and self.settings.filter_fn is not None
-            and not self.settings.filter_fn(response)
-        ):
-            logger.debug(f'Deleting filtered response for URL: {response.url}')
-            self.cache.delete(actions.cache_key)
-            return response
+        if self.settings.filter_fn is not None and not self.settings.filter_fn(response):
+            if not preserve_vary_candidate:
+                logger.debug(f'Deleting filtered response for URL: {response.url}')
+                self.cache.delete(actions.cache_key)
+            # A synthetic Vary miss still needs its response hooks.
+            if not (actions.error_504 and preserve_vary_candidate):
+                return response
 
         # Dispatch any hooks here, because they are removed during serialization
         return dispatch_hook('response', request.hooks, response, **kwargs)
