@@ -7,8 +7,8 @@ from attrs import define, field
 from requests import PreparedRequest, Response
 from requests.structures import CaseInsensitiveDict
 
-from .._utils import coalesce, decode
-from ..cache_keys import normalize_headers
+from .._utils import coalesce, decode, encode, is_json_content_type
+from ..cache_keys import normalize_headers, normalize_request
 from ..models import RichMixin
 from . import (
     DO_NOT_CACHE,
@@ -344,8 +344,8 @@ class CacheActions(RichMixin):
         elif vary == 'REDACTED':
             return False
 
-        # Generate a secondary cache key based on Vary for both the cached request and new request.
-        # If there are redirects, compare the new request against the last request in the chain.
+        # Generate a secondary cache key for the headers nominated by Vary.
+        # Cookie checks use the final request, whose header includes redirect updates.
         match_headers = [k.strip().lower() for k in vary.split(',')]
         if '*' in match_headers:
             return False
@@ -360,10 +360,7 @@ class CacheActions(RichMixin):
 
         # The prepared Cookie header records what was sent; the jar may contain unsent cookies.
         if 'cookie' in match_headers:
-            # ponytail: Alias hits need redirect-aware Cookie validation; fetch the chain instead.
-            if cached_response.history and (
-                not vary_request.url or self._request.url != vary_request.url
-            ):
+            if cached_response.history and not self._matches_final_request(vary_request):
                 return False
             if not self._cookies_match(vary_request):
                 logger.debug('Failed Vary check: cookies do not match')
@@ -403,6 +400,46 @@ class CacheActions(RichMixin):
             )
             return False
         return all(cached_headers.get(h) != 'REDACTED' for h in match_headers)
+
+    def _matches_final_request(self, cached_request: 'CachedRequest') -> bool:
+        """Only reuse a redirected response when the available final identity matches."""
+        for request in (self._request, cached_request):
+            if not request.method or not request.url:
+                return False
+            body: object = request.body
+            if body is not None and not isinstance(body, (str, bytes)):
+                return False  # Normalising a shared stream would read and rewind the live body.
+        if bool(self._request.body) != bool(cached_request.body):
+            return False
+        try:
+            # Form normalisation may have erased a nonempty body such as 'x='.
+            if not cached_request.body and int(cached_request.headers.get('Content-Length', '0')):
+                return False
+            cached = normalize_request(cached_request, ignored_parameters=None)
+            current = normalize_request(self._request, ignored_parameters=None)
+        except (TypeError, ValueError):
+            return False
+        cached_body = encode(cached.body)
+        if (
+            'REDACTED' in (cached.url or '')
+            or b'REDACTED' in encode(cached_request.body)
+            or b'REDACTED' in cached_body
+        ):
+            return False
+        content_type = decode(cached.headers.get('Content-Type', ''), encoding='latin-1')
+        if cached_body and content_type == 'REDACTED':
+            return False
+        # ponytail: Stored JSON arrays may have lost ignored values; provenance is needed to reuse them.
+        if is_json_content_type(
+            content_type.split(';', 1)[0].lower()
+        ) and cached_body.lstrip().startswith(b'['):
+            return False
+
+        return (current.method, current.url, encode(current.body)) == (
+            cached.method,
+            cached.url,
+            cached_body,
+        )
 
     def _cookies_match(self, cached_request: 'CachedRequest') -> bool:
         """Compare sent Cookie headers, retaining jar checks only for two headerless requests."""

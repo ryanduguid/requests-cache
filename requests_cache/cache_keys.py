@@ -29,6 +29,7 @@ from requests import PreparedRequest, Request, Session
 from requests.cookies import RequestsCookieJar
 from requests.structures import CaseInsensitiveDict
 from url_normalize import url_normalize
+from urllib3.util import SKIP_HEADER  # type: ignore[attr-defined]
 
 from ._utils import decode, encode, patch_form_boundary, is_json_content_type
 
@@ -107,8 +108,9 @@ def get_matched_headers(
         return []
     if match_headers is True:
         match_headers = headers
+    # Keep literal byte control values distinct from strings containing their representation.
     return [
-        f'{k.lower()}={headers[k]}'
+        f'{k.lower()}={headers[k]!r}'
         for k in sorted(match_headers, key=lambda x: x.lower())
         if k in headers
     ]
@@ -153,7 +155,12 @@ def normalize_headers(
     """Redact ignored values and decode byte headers so they round-trip through Requests unchanged."""
     ignored_headers = {name.lower() for name in ignored_parameters or []}
     return CaseInsensitiveDict(
-        (name, 'REDACTED' if name.lower() in ignored_headers else decode(value, encoding='latin-1'))
+        (
+            name,
+            'REDACTED'
+            if name.lower() in ignored_headers
+            else (value if value == SKIP_HEADER.encode() else decode(value, encoding='latin-1')),
+        )
         for name, value in headers.items()
     )
 
@@ -186,7 +193,9 @@ def normalize_body(
             logger.warning(f'Unable to reset original request body: {e}', exc_info=True)
 
     try:
-        content_type = request.headers['Content-Type'].split(';')[0].lower()
+        content_type = (
+            decode(request.headers['Content-Type'], encoding='latin-1').split(';')[0].lower()
+        )
     except (AttributeError, KeyError):
         content_type = ''
 

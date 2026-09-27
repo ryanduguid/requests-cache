@@ -3,8 +3,11 @@
 ## Unreleased
 * Match `Vary: Cookie` against the sent header and reject wildcard members and redacted comparisons.
   Redact ignored request cookie jars and redirect snapshots without changing live requests.
-* Preserve byte-valued headers using the same Latin-1 mapping as Requests.
-  Clear older cached entries created with non-ASCII byte headers before using this change.
+  Redirect aliases must match the available final method, normalised URL and body before reuse.
+* Preserve byte-valued headers through JSON serialisers and request preparation, including
+  urllib3's literal byte control value. Clear older entries containing non-ASCII byte headers
+  or `b'@@@SKIP_HEADER@@@'`; clear new JSON entries with that literal before downgrading.
+  Keys using header matching change; clear the cache or use `session.cache.recreate_keys()`.
 * Require Python 3.10+ and patched Requests, urllib3, UltraJSON and orjson releases.
   Remove vulnerable legacy-Python lock entries and update the supported test matrices.
 * Separate cache-key fields and preserve JSON array order and header values when matching.

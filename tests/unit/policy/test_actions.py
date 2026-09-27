@@ -1,11 +1,12 @@
 from datetime import timedelta
+from io import BytesIO
 from unittest.mock import patch
 
 import pytest
 from requests import PreparedRequest, Request
 from requests.cookies import RequestsCookieJar
 
-from requests_cache.cache_keys import create_key
+from requests_cache.cache_keys import create_key, redact_response
 from requests_cache.models import CachedRequest, CachedResponse
 from requests_cache.policy import EXPIRE_IMMEDIATELY, CacheActions, CacheSettings, utcnow
 from tests.conftest import ETAG, HTTPDATE_STR, LAST_MODIFIED, MOCKED_URL, get_mock_response
@@ -448,6 +449,134 @@ def test_update_from_cached_response__vary_cookie(cached_cookies, new_cookies, e
 
     # If cookies don't match, expect a new request (cache miss)
     assert actions.send_request is not expected_match
+
+
+@pytest.mark.parametrize('method', ['POST', 'GET'])
+def test_vary_cookie__same_url_redirect_request_identity(method):
+    """A redirect that changes method or body cannot validate the original request."""
+    url = 'https://example.com/item'
+    initial = Request(method, url, data='payload', headers={'Cookie': 'theme=light'}).prepare()
+    final = Request('GET', url, headers={'Cookie': 'theme=dark'}).prepare()
+    current = Request(method, url, data='payload', headers={'Cookie': 'theme=dark'}).prepare()
+    stored = CachedResponse(
+        url=url,
+        status_code=200,
+        headers={'Vary': 'Cookie'},
+        request=CachedRequest.from_request(final),
+        history=[CachedResponse(status_code=303, request=CachedRequest.from_request(initial))],
+    )
+    assert create_key(initial) == create_key(current)
+    actions = CacheActions.from_request(
+        create_key(current),
+        current,
+        CacheSettings(allowable_methods=('GET', 'POST'), only_if_cached=True),
+    )
+
+    actions.update_from_cached_response(stored, create_key)
+
+    assert actions.error_504
+    assert not actions.send_request
+    assert not actions.resend_request
+
+
+@pytest.mark.parametrize(
+    'current, final, ignored, expected',
+    [
+        ({'method': 'POST'}, {}, [], False),
+        (
+            {'data': 'x=', 'headers': {'Content-Type': 'application/x-www-form-urlencoded'}},
+            {},
+            [],
+            False,
+        ),
+        ({'data': 'calf\xe9'}, {'data': b'calf\xc3\xa9'}, [], True),
+        ({'data': b'\x00\xff'}, {'data': b'\x00\xff'}, [], True),
+        ({'json': {'a': 1, 'b': 2}}, {'json': {'b': 2, 'a': 1}}, ['Authorization'], True),
+        ({'data': {'a': '1', 'b': '2'}}, {'data': {'b': '2', 'a': '1'}}, ['Authorization'], True),
+        ({'json': {'a': 2}}, {'json': {'a': 1}}, [], False),
+        ({'data': {'a': '2'}}, {'data': {'a': '1'}}, [], False),
+        ({'params': {'secret': 'REDACTED'}}, {'params': {'secret': 'fixture'}}, ['secret'], False),
+        ({'json': {'secret': 'REDACTED'}}, {'json': {'secret': 'fixture'}}, ['secret'], False),
+        ({'data': {'secret': 'REDACTED'}}, {'data': {'secret': 'fixture'}}, ['secret'], False),
+        ({'json': ['keep']}, {'json': ['secret', 'keep']}, ['secret'], False),
+        ({'json': []}, {'json': ['secret']}, ['secret'], False),
+        (
+            {'data': b'body'},
+            {'data': b'body', 'headers': {'Content-Type': 'text/plain'}},
+            ['Content-Type'],
+            False,
+        ),
+        ({}, {'headers': {'Content-Type': 'text/plain'}}, ['Content-Type'], True),
+        (
+            {'headers': {'Authorization': 'fixture'}},
+            {'headers': {'Authorization': 'fixture'}},
+            ['Authorization'],
+            True,
+        ),
+        (
+            {},
+            {'data': 'x=', 'headers': {'Content-Type': 'application/x-www-form-urlencoded'}},
+            ['Authorization'],
+            False,
+        ),
+    ],
+)
+def test_vary_cookie__redirect_final_identity(current, final, ignored, expected):
+    """Redacted identity cannot validate an alias, even after ignore settings change."""
+
+    def prepare(kwargs):
+        kwargs = kwargs.copy()
+        headers = {'Cookie': 'theme=dark', **kwargs.pop('headers', {})}
+        return Request(
+            kwargs.pop('method', 'GET'), 'https://example.com/final', headers=headers, **kwargs
+        ).prepare()
+
+    request = prepare(current)
+    final_request = prepare(final)
+    stored = CachedResponse(
+        status_code=200,
+        headers={'Vary': 'Cookie'},
+        content=b'REDACTED',
+        request=CachedRequest.from_request(final_request),
+        history=[
+            CachedResponse(
+                status_code=303, request=CachedRequest(url='https://example.com/REDACTED')
+            )
+        ],
+    )
+    redact_response(stored, ignored)
+    actions = CacheActions.from_request(
+        'fixture-key',
+        request,
+        CacheSettings(
+            allowable_methods=('GET', 'POST'), only_if_cached=True, ignored_parameters=[]
+        ),
+    )
+
+    actions.update_from_cached_response(stored, lambda *_args, **_kwargs: 'constant-key')
+
+    assert actions.error_504 is not expected
+    assert not actions.send_request
+    assert not actions.resend_request
+    assert final_request.headers['Cookie'] == 'theme=dark'
+
+
+def test_vary_cookie__redirect_stream_is_not_consumed():
+    body = BytesIO(b'fixture body')
+    body.seek(8)
+    request = Request(
+        'GET', 'https://example.com/', data=body, headers={'Cookie': 'theme=dark'}
+    ).prepare()
+    response = CachedResponse(
+        headers={'Vary': 'Cookie'},
+        request=CachedRequest(method='GET', url=request.url, body=b'body', headers=request.headers),
+        history=[CachedResponse(status_code=302)],
+    )
+    actions = CacheActions.from_request('fixture-key', request, CacheSettings())
+    with patch('requests_cache.policy.actions.normalize_request') as normalise:
+        assert not actions._validate_vary(response, lambda *_args, **_kwargs: 'constant-key')
+        normalise.assert_not_called()
+    assert body.tell() == 8
 
 
 def test_update_from_cached_response__vary_cookie_and_headers():

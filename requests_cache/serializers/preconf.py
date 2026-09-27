@@ -45,11 +45,17 @@ utf8_serializer = SerializerPipeline([utf8_encoder], 'utf8', is_binary=True)  #:
 bson_preconf_stage = make_stage(
     'cattr.preconf.bson', convert_datetime=False
 )  #: Pre-serialization for BSON
-json_preconf_stage = make_stage('cattr.preconf.json', b64=True)  #: Pre-serialization for JSON
+json_preconf_stage = make_stage(
+    'cattr.preconf.json', b64=True, convert_headers=True
+)  #: Pre-serialization for JSON
 msgpack_preconf_stage = make_stage('cattr.preconf.msgpack')  #: Pre-serialization for msgpack
-orjson_preconf_stage = make_stage('cattr.preconf.orjson', b64=True)  #: Pre-serialization for orjson
+orjson_preconf_stage = make_stage(
+    'cattr.preconf.orjson', b64=True, convert_headers=True
+)  #: Pre-serialization for orjson
 toml_preconf_stage = make_stage('cattr.preconf.tomlkit')  #: Pre-serialization for TOML
-ujson_preconf_stage = make_stage('cattr.preconf.ujson', b64=True)  #: Pre-serialization for ujson
+ujson_preconf_stage = make_stage(
+    'cattr.preconf.ujson', b64=True, convert_headers=True
+)  #: Pre-serialization for ujson
 yaml_preconf_stage = make_stage('cattr.preconf.pyyaml')  #: Pre-serialization for YAML
 
 # Basic serializers with no additional dependencies

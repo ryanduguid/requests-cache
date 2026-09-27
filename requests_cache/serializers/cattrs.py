@@ -27,6 +27,7 @@ from requests.adapters import HTTPAdapter
 from requests.cookies import RequestsCookieJar, cookiejar_from_dict
 from requests.exceptions import RequestException
 from requests.structures import CaseInsensitiveDict
+from urllib3.util import SKIP_HEADER  # type: ignore[attr-defined]
 
 from .._utils import is_json_content_type
 from ..models import CachedResponse, DecodedContent
@@ -103,6 +104,7 @@ def init_converter(
     factory: Optional[Callable[..., Converter]] = None,
     convert_datetime: bool = True,
     convert_timedelta: bool = True,
+    convert_headers: bool = False,
 ) -> Converter:
     """Make a converter to structure and unstructure nested objects within a
     :py:class:`.CachedResponse`
@@ -111,6 +113,7 @@ def init_converter(
         factory: An optional factory function that returns a ``cattrs`` converter
         convert_datetime: May be set to ``False`` for pre-configured converters that already have
             datetime support
+        convert_headers: Encode byte-valued headers for JSON without changing their transport behaviour
     """
     factory = factory or Converter
     try:
@@ -134,9 +137,12 @@ def init_converter(
     # Convert dict-like objects to and from plain dicts
     converter.register_unstructure_hook(RequestsCookieJar, lambda obj: dict(obj.items()))
     converter.register_structure_hook(RequestsCookieJar, lambda obj, cls: cookiejar_from_dict(obj))
-    converter.register_unstructure_hook(CaseInsensitiveDict, dict)
+    converter.register_unstructure_hook(
+        CaseInsensitiveDict, _unstructure_headers if convert_headers else dict
+    )
     converter.register_structure_hook(
-        CaseInsensitiveDict, lambda obj, cls: CaseInsensitiveDict(obj)
+        CaseInsensitiveDict,
+        _structure_headers if convert_headers else lambda obj, cls: CaseInsensitiveDict(obj),
     )
 
     # Tell cattrs to ignore DecodedContent; this will be handled separately in `CattrStage.loads()`
@@ -163,6 +169,30 @@ def init_converter(
     )
 
     return converter
+
+
+def _unstructure_headers(headers: CaseInsensitiveDict) -> dict:
+    """Keep urllib3's literal byte value distinct from its string control value."""
+    return {
+        name: (
+            {'__requests_cache_header_bytes__': SKIP_HEADER}
+            if value == SKIP_HEADER.encode()
+            else value.decode('latin-1')
+            if isinstance(value, bytes)
+            else value
+        )
+        for name, value in headers.items()
+    }
+
+
+def _structure_headers(headers: dict, cls) -> CaseInsensitiveDict:
+    marker = {'__requests_cache_header_bytes__': SKIP_HEADER}
+    return CaseInsensitiveDict(
+        {
+            name: SKIP_HEADER.encode() if value == marker else value
+            for name, value in headers.items()
+        }
+    )
 
 
 def make_decimal_timedelta_converter(**kwargs) -> Converter:

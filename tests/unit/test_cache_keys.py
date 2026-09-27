@@ -366,6 +366,29 @@ def test_normalize_headers__single_header_value_as_bytes():
     assert norm_headers == {'Accept': 'gzip'}
 
 
+@pytest.mark.parametrize('value', [b'@@@SKIP_HEADER@@@', '@@@SKIP_HEADER@@@'])
+def test_normalize_headers__transport_control(value):
+    request = Request('GET', 'https://example.com/', data=b'body', headers={'Content-Type': value})
+    normalized = normalize_request(request.prepare())
+    assert normalized.headers['Content-Type'] == value
+    assert normalized.body == b'body'
+    literal = request.prepare()
+    literal.headers['Content-Type'] = b'@@@SKIP_HEADER@@@'
+    control = request.prepare()
+    control.headers['Content-Type'] = '@@@SKIP_HEADER@@@'
+    assert create_key(literal, match_headers=True) != create_key(control, match_headers=True)
+
+
+def test_match_headers__byte_control_and_repr_string():
+    literal = Request(
+        'GET', 'https://example.com/', headers={'User-Agent': b'@@@SKIP_HEADER@@@'}
+    ).prepare()
+    quoted = Request(
+        'GET', 'https://example.com/', headers={'User-Agent': "b'@@@SKIP_HEADER@@@'"}
+    ).prepare()
+    assert create_key(literal, match_headers=True) != create_key(quoted, match_headers=True)
+
+
 def test_normalize_headers__multiple_header_values_as_bytes():
     headers = {'Accept': b'gzip,  deflate,Venmo,  PayPal, '}
     norm_headers = normalize_headers(headers)

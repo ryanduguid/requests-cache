@@ -87,13 +87,19 @@ isn't available:
 If you want to match _all_ request headers, you can use `match_headers=True`.
 Header names are case-insensitive. Header values retain their case, whitespace and order,
 because their meaning depends on the server and header field.
-Byte-valued headers use the same Latin-1 mapping as Requests. Clear older cache entries created
-with non-ASCII byte headers, since their original bytes cannot be recovered reliably.
+Byte-valued headers use the same Latin-1 mapping as Requests, including with JSON serialisers.
+The literal bytes `b'@@@SKIP_HEADER@@@'` remain distinct from urllib3's string control value.
+Clear older entries containing non-ASCII byte headers or that literal byte value, since their
+original bytes and types cannot always be recovered. New JSON entries use a tagged value for
+that byte literal; clear those entries before returning to an older version.
+Keys using header matching also change; clear the cache or use `session.cache.recreate_keys()`.
 `Vary: Cookie` compares the exact sent header, including an explicit header that overrides a cookie jar.
 Use `match_headers=['Cookie']` to retain different Cookie variants separately.
-For responses with redirect history and `Vary: Cookie`, only a request to the final URL can reuse
-the cached response directly. Requests through redirect aliases must follow the redirects again;
-cache-only requests to those aliases return 504.
+For responses with redirect history and `Vary: Cookie`, only a request matching the final method,
+normalised URL and body can reuse the cached response directly. Requests through other redirect
+aliases must follow the redirects again; cache-only requests return 504.
+The final identity must still be available. Redacted values, streamed bodies and JSON-array bodies
+cannot establish that match; arrays may have lost ignored values without a redaction marker.
 If a nominated value or the `Vary` field itself was redacted, the cached response cannot be reused.
 
 

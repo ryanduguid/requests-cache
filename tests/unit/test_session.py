@@ -547,6 +547,30 @@ def test_match_headers__vary_cookie_redirect_final_explicit_header(mock_session)
     assert mock_session.mock_adapter.call_count == 2
 
 
+@pytest.mark.parametrize('query', ['b=2&a=1', 'q=hello%20world&a=1'])
+def test_match_headers__vary_cookie_redirect_final_query(mock_session, query):
+    """Stored query formatting must not reject an identical direct final request."""
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Authorization']
+    start_url = f'{MOCKED_URL}/start'
+    final_url = f'{MOCKED_URL}/final?{query}'
+    mock_session.mock_adapter.register_uri(
+        'GET', start_url, status_code=302, headers={'Location': final_url}
+    )
+    mock_session.mock_adapter.register_uri(
+        'GET', final_url, headers={'Vary': 'Cookie'}, text='fixture'
+    )
+    mock_session.cookies.set('theme', 'light', path='/')
+    first = mock_session.get(start_url)
+    mock_session.cache.save_response(first)
+
+    second = mock_session.get(final_url, only_if_cached=True)
+
+    assert second.status_code == 200
+    assert second.from_cache
+    assert mock_session.mock_adapter.call_count == 2
+
+
 @pytest.mark.parametrize('match_headers', [False, ['X-Variant']])
 @pytest.mark.parametrize(
     'first_value, next_value, expected_hit',
