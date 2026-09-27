@@ -112,7 +112,7 @@ The final identity must still be available. Stored requests record which fields 
 redaction, so unchanged JSON arrays and literal `REDACTED` text can match. Requests with redacted
 identities or streamed bodies cannot establish that match. Older entries without this record still
 reject ambiguous arrays and redaction markers, since an earlier `content_root_key` setting may have
-removed values. Filtered results from `normalize_request()` also have an unknown redaction history.
+removed values. New normalisation and redaction preserve any known losses and legacy uncertainty.
 If a nominated value or the `Vary` field itself was redacted, the cached response cannot be reused.
 
 

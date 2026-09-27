@@ -134,6 +134,8 @@ def normalize_request(
         ignored_parameters: Request parameters, headers, and/or JSON body params to exclude
         content_root_key: root element in the request body to apply ignored_parameters to
     """
+    from .models.request import _PreparedRequest
+
     ignored_parameters = tuple(ignored_parameters or ())
     if isinstance(request, Request):
         # For a multipart POST request that hasn't been prepared, we need to patch the form boundary
@@ -143,16 +145,26 @@ def normalize_request(
     else:
         norm_request = request.copy()
 
-    # This helper can discard values before storage. Only the storage redaction path records
-    # which fields lost information; preserve an unknown history for filtered helper results.
-    norm_request.redacted_fields = (  # type: ignore[union-attr]
-        None if ignored_parameters else getattr(request, 'redacted_fields', [])
-    )
+    if type(norm_request) is PreparedRequest:
+        norm_request.__class__ = _PreparedRequest
+    norm_request.redacted_fields = getattr(request, 'redacted_fields', [])  # type: ignore[union-attr]
 
     norm_request.method = (norm_request.method or '').upper()
-    norm_request.url = normalize_url(norm_request.url or '', ignored_parameters)
-    norm_request.body = normalize_body(norm_request, ignored_parameters, content_root_key)
-    norm_request.headers = normalize_headers(norm_request.headers, ignored_parameters)
+    original_url = norm_request.url or ''
+    norm_request.url = normalize_url(original_url, ignored_parameters)
+    original_body: object = norm_request.body
+    if original_body is not None and not isinstance(original_body, (str, bytes)):
+        _record_redaction(norm_request, 'body')
+    norm_request.body, body_redacted = _normalize_body(
+        norm_request, ignored_parameters, content_root_key
+    )
+    if body_redacted:
+        _record_redaction(norm_request, 'body')
+    if ignored_parameters and urlparse(norm_request.url).query != normalize_params(
+        urlparse(original_url).query
+    ):
+        _record_redaction(norm_request, 'url')
+    _redact_headers(norm_request, ignored_parameters)
     _redact_cookie_jar(norm_request, ignored_parameters)
     return norm_request
 
@@ -191,10 +203,19 @@ def normalize_body(
     content_root_key: Optional[str] = None,
 ) -> bytes:
     """Normalize and filter a request body if possible, depending on Content-Type"""
+    return _normalize_body(request, ignored_parameters, content_root_key)[0]
+
+
+def _normalize_body(
+    request: AnyPreparedRequest,
+    ignored_parameters: ParamList,
+    content_root_key: Optional[str] = None,
+) -> Tuple[bytes, bool]:
     if not request.body:
-        return b''
+        return b'', False
 
     norm_body: Union[str, bytes] = request.body
+    redacted = False
 
     # Handle the case where the request body is a file-like object
     if hasattr(request.body, 'read'):
@@ -213,11 +234,13 @@ def normalize_body(
 
     # Filter and sort params if possible
     if is_json_content_type(content_type):
-        norm_body = normalize_json_body(norm_body, ignored_parameters, content_root_key)
+        norm_body, redacted = _normalize_json_body(norm_body, ignored_parameters, content_root_key)
     elif content_type == 'application/x-www-form-urlencoded':
-        norm_body = normalize_params(norm_body, ignored_parameters)
+        filtered = normalize_params(norm_body, ignored_parameters)
+        redacted = bool(ignored_parameters) and filtered != normalize_params(norm_body)
+        norm_body = filtered
 
-    return encode(norm_body)
+    return encode(norm_body), redacted
 
 
 def normalize_json_body(
@@ -226,23 +249,36 @@ def normalize_json_body(
     content_root_key: Optional[str] = None,
 ) -> Union[str, bytes]:
     """Normalize and filter a request body with serialized JSON data"""
+    return _normalize_json_body(original_body, ignored_parameters, content_root_key)[0]
+
+
+def _normalize_json_body(
+    original_body: Union[str, bytes],
+    ignored_parameters: ParamList,
+    content_root_key: Optional[str] = None,
+) -> Tuple[Union[str, bytes], bool]:
     if len(original_body) <= 2 or (
         len(original_body) > MAX_NORM_BODY_SIZE and not ignored_parameters
     ):
-        return original_body
+        return original_body, False
 
     try:
         body = _json.loads(decode(original_body))
     # If it's invalid JSON, then don't mess with it
     except (json.JSONDecodeError, UnicodeDecodeError):
         logger.debug('Invalid JSON body')
-        return original_body
+        return original_body, False
 
     if content_root_key and isinstance(body, dict) and content_root_key in body:
-        body[content_root_key] = filter_sort_json(body[content_root_key], ignored_parameters)
+        selected = body[content_root_key]
+        filtered = filter_sort_json(selected, ignored_parameters)
+        redacted = filtered != selected
+        body[content_root_key] = filtered
     else:
-        body = filter_sort_json(body, ignored_parameters)
-    return _json.dumps(body)
+        filtered = filter_sort_json(body, ignored_parameters)
+        redacted = filtered != body
+        body = filtered
+    return _json.dumps(body), redacted
 
 
 def normalize_params(value: Union[str, bytes], ignored_parameters: ParamList = None) -> str:
@@ -282,18 +318,13 @@ def redact_response(
                 if request is None:
                     continue
                 url = filter_url(request.url, ignored_parameters)
-                body = normalize_body(request, ignored_parameters, content_root_key)
-                if request.redacted_fields is not None:
-                    removed = set(request.redacted_fields)
-                    if url != request.url and url != filter_url(request.url, None):
-                        removed.add('url')
-                    # ponytail: Changed bodies may be parsed twice; return loss flags if write cost dominates.
-                    if body != encode(request.body) and body != normalize_body(
-                        request, None, content_root_key
-                    ):
-                        removed.add('body')
-                    request.redacted_fields = sorted(removed)
-                request.url, request.body = url, body
+                body, body_redacted = _normalize_body(request, ignored_parameters, content_root_key)
+                if url != request.url and url != filter_url(request.url, None):
+                    _record_redaction(request, 'url')
+                if body_redacted:
+                    _record_redaction(request, 'body')
+                    request.body = body
+                request.url = url
                 _redact_headers(request, ignored_parameters)
                 _redact_cookie_jar(request, ignored_parameters)
     return response
@@ -301,16 +332,24 @@ def redact_response(
 
 def _redact_headers(obj, ignored_parameters: ParamList):
     ignored = {name.lower() for name in ignored_parameters or []}
-    if obj.redacted_fields is not None:
-        obj.redacted_fields = sorted(
-            set(obj.redacted_fields)
-            | {f'header:{name.lower()}' for name in obj.headers if name.lower() in ignored}
-        )
+    _record_redaction(
+        obj, *(f'header:{name.lower()}' for name in obj.headers if name.lower() in ignored)
+    )
     obj.headers = normalize_headers(obj.headers, ignored_parameters)
+
+
+def _record_redaction(obj, *fields: str):
+    if fields:
+        previous = getattr(obj, 'redacted_fields', None)
+        obj.redacted_fields = sorted(
+            set(previous if previous is not None else ['unknown']) | set(fields)
+        )
 
 
 def _redact_cookie_jar(request: AnyPreparedRequest, ignored_parameters: ParamList):
     if 'cookie' in {name.lower() for name in ignored_parameters or []}:
+        if getattr(request, '_cookies', None):
+            _record_redaction(request, 'cookies')
         # CachedRequest may share this jar with the live request, so replace it instead of clearing it.
         if isinstance(request, PreparedRequest):
             request._cookies = RequestsCookieJar()  # type: ignore[attr-defined]

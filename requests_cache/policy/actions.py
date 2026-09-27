@@ -341,7 +341,7 @@ class CacheActions(RichMixin):
         """If the cached response contains Vary, check that the specified request headers match"""
         vary = cached_response.headers.get('Vary')
         redacted = getattr(cached_response, 'redacted_fields', None)
-        if (redacted is None and vary == 'REDACTED') or (
+        if ((redacted is None or 'unknown' in redacted) and vary == 'REDACTED') or (
             redacted is not None and 'header:vary' in redacted
         ):
             return False
@@ -404,9 +404,11 @@ class CacheActions(RichMixin):
             )
             return False
         redacted = getattr(cached_request, 'redacted_fields', None)
-        if redacted is None:
+        if any(f'header:{h}' in (redacted or []) for h in match_headers):
+            return False
+        if redacted is None or 'unknown' in redacted:
             return all(cached_headers.get(h) != 'REDACTED' for h in match_headers)
-        return not any(f'header:{h}' in redacted for h in match_headers)
+        return True
 
     def _matches_final_request(self, cached_request: 'CachedRequest') -> bool:
         """Only reuse a redirected response when the available final identity matches."""
@@ -457,6 +459,8 @@ class CacheActions(RichMixin):
         )
         if cached_field[0] or current_field[0]:
             return cached_field == current_field
+        if 'cookies' in (getattr(cached_request, 'redacted_fields', None) or []):
+            return False
         if 'cookie' in {h.lower() for h in (self._settings.ignored_parameters or [])}:
             return True
 
@@ -503,9 +507,10 @@ def _has_complete_identity(original: 'CachedRequest', normalised: 'AnyPreparedRe
     """Use recorded data loss where available, and conservative checks for legacy entries."""
     redacted = getattr(original, 'redacted_fields', None)
     if redacted is not None:
-        return not (
-            {'url', 'body'} & set(redacted) or (original.body and 'header:content-type' in redacted)
-        )
+        if {'url', 'body'} & set(redacted) or (original.body and 'header:content-type' in redacted):
+            return False
+        if 'unknown' not in redacted:
+            return True
     body = encode(normalised.body)
     if (
         'REDACTED' in (normalised.url or '')

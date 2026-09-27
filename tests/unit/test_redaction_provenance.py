@@ -1,9 +1,12 @@
 """Cache-only matching distinguishes literal values from removed request data."""
 
+import pickle
+from io import BytesIO
+
 import pytest
 from requests import Request
 
-from requests_cache import CachedRequest, CachedResponse, init_serializer
+from requests_cache import CachedRequest, CachedResponse, cache_keys, init_serializer
 from requests_cache.cache_keys import normalize_request, redact_response
 from requests_cache.policy import CacheActions, CacheSettings
 from tests.conftest import MOCKED_URL
@@ -60,7 +63,8 @@ def test_unredacted_redirect_identity(mock_session, serializer_name, query, kwar
 
 @pytest.mark.parametrize('serializer_name', ['json', 'ujson', 'orjson', 'pickle', 'yaml', 'bson'])
 @pytest.mark.parametrize('field', ['url', 'body', 'array', 'selected-array', 'header', 'vary'])
-def test_removed_identity_survives_copy_and_storage(serializer_name, field):
+@pytest.mark.parametrize('copy_prepared', [False, True])
+def test_removed_identity_survives_copy_and_storage(serializer_name, field, copy_prepared):
     if serializer_name not in ('json', 'pickle'):
         pytest.importorskip(serializer_name)
     kwargs = {
@@ -94,6 +98,8 @@ def test_removed_identity_survives_copy_and_storage(serializer_name, field):
     redact_response(original, iter(ignored), content_root_key='data')
     serializer = init_serializer(serializer_name, decode_content=False)
     stored = serializer.loads(serializer.dumps(CachedResponse.from_response(original)))
+    if copy_prepared:
+        stored.request = CachedRequest.from_request(stored.request.prepare().copy().copy())
     current = stored.request.prepare()
     if field == 'vary':
         current.headers['REDACTED'] = 'fixture'
@@ -112,8 +118,98 @@ def test_removed_identity_survives_copy_and_storage(serializer_name, field):
     assert not actions.send_request and not actions.resend_request
 
 
+def test_large_unchanged_json_is_not_marked_as_lost(mock_session, monkeypatch):
+    monkeypatch.setattr(cache_keys, 'MAX_NORM_BODY_SIZE', 10)
+    test_unredacted_redirect_identity(mock_session, 'json', '', {'json': {'z': ['kept'], 'a': 1}})
+
+
+def test_legacy_pickle_can_be_copied_and_redacted():
+    original = CachedResponse(
+        url='https://example.com/',
+        request=CachedRequest.from_request(Request('GET', 'https://example.com/').prepare()),
+    )
+    del original.redacted_fields
+    legacy = pickle.loads(pickle.dumps(original))
+
+    copied = CachedResponse.from_response(legacy)
+    redact_response(copied, ['unused'])
+
+    assert copied.redacted_fields is None
+
+
+@pytest.mark.parametrize('tuple_state', [False, True])
+def test_legacy_request_state_keeps_new_loss_and_uncertainty(tuple_state):
+    request = CachedRequest.from_request(
+        Request('POST', 'https://example.com/', json=['secret', 'kept']).prepare()
+    )
+    state = request.__getstate__()
+    state.pop('redacted_fields')
+    if tuple_state:
+        state = tuple(state.values())
+    legacy = CachedRequest.__new__(CachedRequest)
+    legacy.__setstate__(state)
+    assert legacy.redacted_fields is None
+    assert legacy.copy().prepare().copy().redacted_fields is None
+    response = CachedResponse(url=request.url, request=legacy)
+
+    redact_response(response, ['secret'])
+
+    assert 'unknown' in response.request.redacted_fields
+    assert 'body' in response.request.redacted_fields
+    assert response.request.copy().redacted_fields == response.request.redacted_fields
+
+
+@pytest.mark.parametrize('normalise', [False, True])
+def test_stream_identity_does_not_become_trusted_text(normalise):
+    request = Request('POST', 'https://example.com/', data=BytesIO(b'fixture')).prepare()
+    if normalise:
+        request = normalize_request(request)
+    cached = CachedRequest.from_request(request)
+
+    assert 'body' in cached.redacted_fields
+
+
+def test_request_parameters_do_not_imply_redaction():
+    cached = CachedRequest.from_request(
+        normalize_request(
+            Request('GET', 'https://example.com/', params={'kept': 'fixture'}), ['unused']
+        )
+    )
+    assert cached.redacted_fields == []
+
+
+def test_headerless_cookie_loss_survives_ignored_settings():
+    request = Request('GET', 'https://example.com/', cookies={'theme': 'fixture'}).prepare()
+    del request.headers['Cookie']
+    stored = CachedResponse(
+        url=request.url,
+        request=CachedRequest.from_request(request),
+        status_code=200,
+        headers={'Vary': 'Cookie'},
+    )
+    stored.request.redacted_fields = None
+    redact_response(stored, ['Cookie'])
+    current = Request('GET', request.url).prepare()
+    actions = CacheActions.from_request(
+        'fixture-key', current, CacheSettings(only_if_cached=True, ignored_parameters=['Cookie'])
+    )
+
+    actions.update_from_cached_response(stored, lambda *_args, **_kwargs: 'fixture-key')
+
+    assert actions.error_504
+    assert not actions.send_request and not actions.resend_request
+
+
+def test_filtered_normalisation_survives_native_copy():
+    original = Request('GET', 'https://example.com/?secret=fixture').prepare()
+    filtered = normalize_request(original, ['secret'])
+    copied = CachedRequest.from_request(filtered.copy().copy())
+    assert copied.redacted_fields == ['url']
+    assert copied.url.endswith('secret=REDACTED')
+
+
 @pytest.mark.parametrize('normalise_first', [False, True])
-def test_unknown_redaction_history_stays_unknown(normalise_first):
+def test_normalisation_distinguishes_legacy_and_fresh_requests(normalise_first):
     prepared = Request('POST', 'https://example.com/', json=['kept']).prepare()
     if normalise_first:
         prepared = normalize_request(prepared, ignored_parameters=['secret'])
@@ -138,5 +234,5 @@ def test_unknown_redaction_history_stays_unknown(normalise_first):
 
     actions.update_from_cached_response(response, lambda *_args, **_kwargs: 'fixture-key')
 
-    assert actions.error_504
+    assert actions.error_504 is not normalise_first
     assert not actions.send_request and not actions.resend_request

@@ -191,6 +191,7 @@ class CachedResponse(RichMixin, BaseResponse):
 
     def __setstate__(self, state):
         """Override pickling behavior from ``requests.Response.__setstate__``"""
+        self.redacted_fields = None
         for name, value in state.items():
             setattr(self, name, value)
 
