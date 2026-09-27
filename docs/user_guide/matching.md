@@ -1,7 +1,10 @@
 (matching)=
 # {fas}`equals` Request Matching
-Requests are matched according to the request method, URL, parameters and body. All of these values
-are normalized to account for any variations that do not modify response content.
+Requests are matched according to the request method, URL, parameters and body. Normalisation
+ignores parameter order and standardises URL spelling, such as host case and default ports.
+Query and form matching distinguish literal plus signs from spaces, bare names from empty values,
+and different percent-encoded bytes or Unicode code points. Duplicate parameter order is ignored;
+use custom matching if your server distinguishes that order.
 
 There are some additional options to configure how you want requests to be matched.
 
@@ -38,6 +41,13 @@ This also applies to parameters in a JSON-formatted request body:
 >>> r = session.post('https://httpbin.org/post', json={'auth-token': 'D9FAEB3449D3'})
 >>> assert r.from_cache is True
 ```
+
+JSON matching preserves scalar types and precise numbers. Numbers that cannot pass through a
+Python float without changing their decimal value retain their original spelling, so equivalent
+spellings of those numbers may produce separate entries. Array order is preserved. Duplicate
+object members retain the last value, as in Python's JSON decoder.
+`content_root_key` applies filtering to the selected root in both keys and stored requests.
+Malformed JSON passes through unchanged; its fields are not redacted.
 
 **Request Headers:**
 
@@ -92,7 +102,6 @@ The literal bytes `b'@@@SKIP_HEADER@@@'` remain distinct from urllib3's string c
 Clear older entries containing non-ASCII byte headers or that literal byte value, since their
 original bytes and types cannot always be recovered. New JSON entries use a tagged value for
 that byte literal; clear those entries before returning to an older version.
-Keys using header matching also change; clear the cache or use `session.cache.recreate_keys()`.
 `Vary: Cookie` compares the exact sent header, including an explicit header that overrides a cookie jar.
 Use `match_headers=['Cookie']` to retain different Cookie variants separately.
 For responses with redirect history and `Vary: Cookie`, only a request matching the final method,
@@ -121,6 +130,14 @@ the second and third requests below share a cached response:
 ```
 
 ### Recreating Cache Keys
+```{warning}
+This update uses a new default cache-key namespace. Start with a fresh cache or clear the old cache,
+including redirect aliases. Older stored requests may have lost parameter values, empty fields or
+JSON precision, and decoded responses may also be damaged. `recreate_keys()` cannot recover that
+information. Custom key functions must invalidate old entries themselves. The steps below apply
+only when the stored request data is still complete.
+```
+
 There are some situations where request matching behavior may change, which causes previously cached
 responses to become obsolete:
 * You start using a custom cache key, or change other settings that affect request matching

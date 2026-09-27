@@ -1,17 +1,22 @@
 # History
 
 ## Unreleased
+* Preserve query and form values, empty fields and percent-encoded bytes during normalisation.
+  Keep literal plus signs distinct from spaces and avoid normalising query values twice.
+  Default keys use a new namespace: start with a fresh cache, including redirect aliases.
+  Recreating keys cannot recover values lost from older stored requests.
+* Preserve JSON request numbers and scalar types while redacting ignored values, including
+  selected roots in stored redirects and requests with an ignored Content-Type header.
+  Keep response body bytes when decoded JSON would lose precision, duplicate members or `null`.
 * Match `Vary: Cookie` against the sent header and reject wildcard members and redacted comparisons.
   Redact ignored request cookie jars and redirect snapshots without changing live requests.
   Redirect aliases must match the available final method, normalised URL and body before reuse.
 * Preserve byte-valued headers through JSON serialisers and request preparation, including
   urllib3's literal byte control value. Clear older entries containing non-ASCII byte headers
   or `b'@@@SKIP_HEADER@@@'`; clear new JSON entries with that literal before downgrading.
-  Keys using header matching change; clear the cache or use `session.cache.recreate_keys()`.
 * Require Python 3.10+ and patched Requests, urllib3, UltraJSON and orjson releases.
   Remove vulnerable legacy-Python lock entries and update the supported test matrices.
 * Separate cache-key fields and preserve JSON array order and header values when matching.
-  Existing keys change: clear the cache or use `session.cache.recreate_keys()` to reuse stored responses.
 * Redact ignored header names regardless of case and ignored JSON fields above the normalisation size limit.
   Existing cache files are not scrubbed automatically; clear or rewrite entries containing sensitive values.
 * Honour SQLite lock timeouts and close database connections before fallback cache clearing.

@@ -23,7 +23,7 @@ from typing import (
     Tuple,
     Union,
 )
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote_plus, unquote_to_bytes, urlencode, urlparse, urlunparse
 
 from requests import PreparedRequest, Request, Session
 from requests.cookies import RequestsCookieJar
@@ -31,6 +31,7 @@ from requests.structures import CaseInsensitiveDict
 from url_normalize import url_normalize
 from urllib3.util import SKIP_HEADER  # type: ignore[attr-defined]
 
+from . import _json
 from ._utils import decode, encode, patch_form_boundary, is_json_content_type
 
 __all__ = [
@@ -75,6 +76,7 @@ def create_key(
     # Normalize and gather all relevant request info to match against
     request = normalize_request(request, ignored_parameters, content_root_key)
     key_parts = [
+        b'requests-cache-key-v2',  # Old normalisation could erase values in stored request metadata.
         request.method or '',
         request.url,
         request.body or '',
@@ -142,8 +144,8 @@ def normalize_request(
 
     norm_request.method = (norm_request.method or '').upper()
     norm_request.url = normalize_url(norm_request.url or '', ignored_parameters)
-    norm_request.headers = normalize_headers(norm_request.headers, ignored_parameters)
     norm_request.body = normalize_body(norm_request, ignored_parameters, content_root_key)
+    norm_request.headers = normalize_headers(norm_request.headers, ignored_parameters)
     _redact_cookie_jar(norm_request, ignored_parameters)
     return norm_request
 
@@ -169,8 +171,11 @@ def normalize_url(url: str, ignored_parameters: ParamList) -> str:
     """Normalize and filter a URL. This includes request parameters, IDN domains, scheme, host,
     port, etc.
     """
-    url = filter_url(url, ignored_parameters)
-    return url_normalize(url) or ''
+    url_tokens = urlparse(url)
+    query = normalize_params(url_tokens.query, ignored_parameters)
+    # The URL normaliser collapses literal plus signs, spaces and empty query values.
+    base_url = url_normalize(urlunparse(url_tokens._replace(query=''))) or ''
+    return urlunparse(urlparse(base_url)._replace(query=query))
 
 
 def normalize_body(
@@ -220,27 +225,36 @@ def normalize_json_body(
         return original_body
 
     try:
-        body = json.loads(decode(original_body))
-        if content_root_key and isinstance(body, dict) and content_root_key in body:
-            body[content_root_key] = filter_sort_json(body[content_root_key], ignored_parameters)
-        else:
-            body = filter_sort_json(body, ignored_parameters)
-        return json.dumps(body)
+        body = _json.loads(decode(original_body))
     # If it's invalid JSON, then don't mess with it
-    except (AttributeError, TypeError, ValueError):
+    except (json.JSONDecodeError, UnicodeDecodeError):
         logger.debug('Invalid JSON body')
         return original_body
+
+    if content_root_key and isinstance(body, dict) and content_root_key in body:
+        body[content_root_key] = filter_sort_json(body[content_root_key], ignored_parameters)
+    else:
+        body = filter_sort_json(body, ignored_parameters)
+    return _json.dumps(body)
 
 
 def normalize_params(value: Union[str, bytes], ignored_parameters: ParamList = None) -> str:
     """Normalize and filter urlencoded params from either a URL or request body with form data"""
-    value = decode(value)
-    params = parse_qsl(value)
+    components = decode(value).split('&')
+    params = parse_qsl(
+        '&'.join(component for component in components if '=' in component),
+        keep_blank_values=True,
+        errors='surrogateescape',
+    )
     params = filter_sort_multidict(params, ignored_parameters)
-    query_str = urlencode(params)
+    query_str = urlencode(params, errors='surrogateescape')
 
-    # parse_qsl doesn't handle key-only params, so add those here
-    key_only_params = [k for k in value.split('&') if k and '=' not in k]
+    # Preserve bare names separately from empty-valued fields, decoding each octet once.
+    key_only_params = [
+        quote_plus(unquote_to_bytes(component.replace('+', ' ')), safe='')
+        for component in components
+        if component and '=' not in component
+    ]
     if key_only_params:
         key_only_param_str = '&'.join(sorted(key_only_params))
         query_str = f'{query_str}&{key_only_param_str}' if query_str else key_only_param_str
@@ -248,7 +262,9 @@ def normalize_params(value: Union[str, bytes], ignored_parameters: ParamList = N
     return query_str
 
 
-def redact_response(response: CachedResponse, ignored_parameters: ParamList) -> CachedResponse:
+def redact_response(
+    response: CachedResponse, ignored_parameters: ParamList, content_root_key: Optional[str] = None
+) -> CachedResponse:
     """Redact any ignored parameters (potentially containing sensitive info) from a cached request"""
     if ignored_parameters:
         for cached_response in [response, *response.history]:
@@ -258,8 +274,8 @@ def redact_response(response: CachedResponse, ignored_parameters: ParamList) -> 
                 if request is None:
                     continue
                 request.url = filter_url(request.url, ignored_parameters)
+                request.body = normalize_body(request, ignored_parameters, content_root_key)
                 request.headers = normalize_headers(request.headers, ignored_parameters)
-                request.body = normalize_body(request, ignored_parameters)
                 _redact_cookie_jar(request, ignored_parameters)
     return response
 
@@ -273,11 +289,12 @@ def _redact_cookie_jar(request: AnyPreparedRequest, ignored_parameters: ParamLis
             request.cookies = RequestsCookieJar()
 
 
-def filter_sort_json(data: Union[List, Mapping], ignored_parameters: ParamList):
+def filter_sort_json(data, ignored_parameters: ParamList):
     if isinstance(data, Mapping):
         return filter_sort_dict(data, ignored_parameters)
-    else:
+    elif isinstance(data, list):
         return filter_sort_list(data, ignored_parameters)
+    return data
 
 
 def filter_sort_dict(

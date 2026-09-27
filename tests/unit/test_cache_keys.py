@@ -14,13 +14,15 @@ from requests_cache.cache_keys import (
     MAX_NORM_BODY_SIZE,
     create_key,
     normalize_headers,
+    normalize_params,
     normalize_request,
+    normalize_url,
     redact_response,
 )
 from requests_cache.models import CachedRequest, CachedResponse
 from requests_cache.serializers import init_serializer
 
-CACHE_KEY = 'da1b904fcb218852'
+CACHE_KEY = '2d9a656f503c1e39'
 
 
 @pytest.mark.parametrize('request_type', ['request', 'prepared', 'cached'])
@@ -184,6 +186,113 @@ def test_create_key__normalize_key_only_params():
     request_1 = Request(method='GET', url='https://img.site.com/base/img.jpg?k=v&param_1')
     request_2 = Request(method='GET', url='https://img.site.com/base/img.jpg?param_1&k=v')
     assert create_key(request_1) == create_key(request_2)
+
+
+@pytest.mark.parametrize(
+    'first, second, expected_match',
+    [
+        ('?q=a%2Bb', '?q=a+b', False),
+        ('?q=%2B', '?q=+', False),
+        ('?x=', '', False),
+        ('?x=&x=1', '?x=1', False),
+        ('?flag', '?flag=', False),
+        ('?flag', '?flag&flag', False),
+        ('?flag%2Bname', '?flag+name', False),
+        ('?q=%26', '?q=&', False),
+        ('?q=%252B', '?q=%2B', False),
+        ('?q=a%20b', '?q=a+b', True),
+        ('?q=%2b', '?q=%2B', True),
+        ('?q=%3D', '?q==', True),
+        ('?q=%C3%A9', '?q=calf%C3%A9', False),
+        ('?q=%C3%A9', '?q=\xe9', True),
+        ('?q=a%2Bb&x=', '?x=&q=a%2bb', True),
+        ('?c%61lf%C3%A9', '?calf%C3%A9', True),
+        ('?flag%20name', '?flag+name', True),
+        ('?=value', '?value', False),
+        ('?q=%FF', '?q=%FE', False),
+        ('?q=%FF', '?q=%EF%BF%BD', False),
+        ('?bad%FF=x', '?bad%FE=x', False),
+        ('?bad%FF', '?bad%FE', False),
+        ('?q=e%CC%81', '?q=%C3%A9', False),
+    ],
+)
+def test_create_key__query_value_identity(first, second, expected_match):
+    requests = [
+        Request('GET', f'https://example.com/{query}').prepare() for query in (first, second)
+    ]
+    assert (create_key(requests[0]) == create_key(requests[1])) is expected_match
+
+
+@pytest.mark.parametrize(
+    'first, second, expected_match',
+    [
+        ('x=', '', False),
+        ('x=&x=1', 'x=1', False),
+        ('flag', 'flag=', False),
+        ('x=a%2Bb', 'x=a+b', False),
+        ('x=a%20b', 'x=a+b', True),
+        ('x=&flag', 'flag&x=', True),
+    ],
+)
+def test_create_key__form_value_identity(first, second, expected_match):
+    requests = [
+        Request(
+            'POST',
+            'https://example.com/',
+            data=body,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        ).prepare()
+        for body in (first, second)
+    ]
+    assert (create_key(requests[0]) == create_key(requests[1])) is expected_match
+
+
+@pytest.mark.parametrize('field', ['params', 'data'])
+def test_create_key__ignored_blank_value(field):
+    first = Request('GET', 'https://example.com/', **{field: {'secret': ''}}).prepare()
+    second = Request('GET', 'https://example.com/', **{field: {'secret': 'fixture'}}).prepare()
+    assert create_key(first, ignored_parameters=['secret']) == create_key(
+        second, ignored_parameters=['secret']
+    )
+    redacted = normalize_request(first, ignored_parameters=['secret'])
+    content = redacted.url if field == 'params' else redacted.body.decode()
+    assert 'secret=REDACTED' in content
+
+
+@pytest.mark.parametrize(
+    'value, expected',
+    [
+        ('q=a%2bb', 'q=a%2Bb'),
+        ('q=a%20b', 'q=a+b'),
+        ('x=&x=&flag&flag', 'x=&x=&flag&flag'),
+        ('=', '='),
+        ('a%3Db&a%26b', 'a%26b&a%3Db'),
+        ('a%252Bb&a%2Bb', 'a%252Bb&a%2Bb'),
+        ('calf\xe9&flag%20name', 'calf%C3%A9&flag+name'),
+        ('q=%FF&bad%FE', 'q=%FF&bad%FE'),
+        ('q=a%3Bb&&', 'q=a%3Bb'),
+        ('secret=&to%6Ben=fixture&token', 'secret=REDACTED&token=REDACTED&token'),
+    ],
+)
+def test_normalize_params__canonicalisation(value, expected):
+    for source in (value, value.encode()):
+        result = normalize_params(source, ['secret', 'token'])
+        assert result == expected
+        assert normalize_params(result, ['secret', 'token']) == result
+
+
+@pytest.mark.parametrize(
+    'url, expected',
+    [
+        ('HTTP://B\xdcCHER.example:80/p;v?q=%23x#f', 'http://xn--bcher-kva.example/p;v?q=%23x#f'),
+        ('https://example.com:443/p?x=', 'https://example.com/p?x='),
+        ('https://example.com:8443/p?x=', 'https://example.com:8443/p?x='),
+    ],
+)
+def test_normalize_url__query_isolation(url, expected):
+    result = normalize_url(url, ['Authorization'])
+    assert result == expected
+    assert normalize_url(result, ['Authorization']) == result
 
 
 def test_create_key__normalize_duplicate_params():

@@ -17,8 +17,7 @@ from __future__ import annotations
 from collections.abc import MutableMapping
 from datetime import datetime, timedelta
 from decimal import Decimal
-from functools import singledispatchmethod
-from json import JSONDecodeError
+from functools import partial, singledispatchmethod
 from typing import Callable, Dict, ForwardRef, List, Optional, Union
 
 import attrs
@@ -30,6 +29,7 @@ from requests.structures import CaseInsensitiveDict
 from urllib3.util import SKIP_HEADER  # type: ignore[attr-defined]
 
 from .._utils import decode, is_json_content_type
+from .._json import decode_float
 from ..models import CachedResponse, DecodedContent
 from .pipeline import Stage
 
@@ -213,10 +213,19 @@ def _decode_content(response: CachedResponse, response_dict: Dict) -> Dict:
 
     # Decode body as JSON
     if is_json_content_type(ct_header):
+        response_dict.pop('_decoded_content', None)
         try:
-            response_dict['_decoded_content'] = response.json()
-            response_dict.pop('_content', None)
-        except (JSONDecodeError, RequestException):
+            decoded = response.json(
+                parse_float=partial(decode_float, dumps=json.dumps),
+                parse_int=_decode_json_int,
+                parse_constant=_reject_json_constant,
+                object_pairs_hook=_decode_json_object,
+            )
+            # None is the model's sentinel for no decoded body, so retain the bytes for JSON null.
+            if decoded is not None:
+                response_dict['_decoded_content'] = decoded
+                response_dict.pop('_content', None)
+        except (ValueError, RequestException):
             pass
 
     # Decode body as text
@@ -226,6 +235,25 @@ def _decode_content(response: CachedResponse, response_dict: Dict) -> Dict:
 
     # Otherwise, it is most likely a binary body
     return response_dict
+
+
+def _decode_json_int(value: str) -> int:
+    number = int(value)
+    # All built-in serialisers support signed 64-bit integers; keep larger values as body bytes.
+    if value == '-0' or not -(2**63) <= number < 2**63:
+        raise ValueError('JSON integer requires binary storage')
+    return number
+
+
+def _reject_json_constant(value):
+    raise ValueError('Non-finite JSON number requires binary storage')
+
+
+def _decode_json_object(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError('Duplicate JSON members require binary storage')
+    return result
 
 
 def _encode_content(response: CachedResponse) -> CachedResponse:

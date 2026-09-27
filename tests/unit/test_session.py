@@ -120,7 +120,7 @@ def test_response_defaults(mock_session):
     response_1 = mock_session.get(MOCKED_URL)
     response_2 = mock_session.get(MOCKED_URL)
     response_3 = mock_session.get(MOCKED_URL)
-    cache_key = '2863cc857f1a31e0'
+    cache_key = '1d55e271c1e7c031'
 
     assert response_1.cache_key == cache_key
     assert isinstance(response_1.created_at, datetime)
@@ -545,6 +545,49 @@ def test_match_headers__vary_cookie_redirect_final_explicit_header(mock_session)
     )
     assert third.status_code == 504
     assert mock_session.mock_adapter.call_count == 2
+
+
+@pytest.mark.parametrize(
+    'first_query, second_query',
+    [
+        ('?q=a%2Bb', '?q=a+b'),
+        ('?x=', ''),
+        ('?x=&x=1', '?x=1'),
+    ],
+)
+def test_cache_key__query_variants(mock_session, first_query, second_query):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Authorization']
+    urls = [f'{MOCKED_URL}/{query}' for query in (first_query, second_query)]
+    for url, body in zip(urls, ['first fixture', 'second fixture'], strict=False):
+        mock_session.mock_adapter.register_uri('GET', url, text=body, complete_qs=True)
+    assert mock_session.get(urls[0]).text == 'first fixture'
+
+    cached = mock_session.get(urls[1], only_if_cached=True)
+
+    assert cached.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+    response = mock_session.get(urls[1])
+    assert response.text == 'second fixture'
+    assert not response.from_cache
+    assert mock_session.mock_adapter.call_count == 2
+
+
+def test_cache_key__legacy_ambiguous_query_entry():
+    """Old redaction could erase a blank field; an unchanged old key must not restore that hit."""
+    with CachedSession(backend='memory') as session:
+        session.trust_env = False
+        url = 'https://example.com/'
+        # Produced before query normalisation retained empty values, for both / and /?x=.
+        session.cache.responses['db31883d482a4b46'] = CachedResponse(
+            url=url,
+            status_code=200,
+            content=b'legacy blank fixture',
+            request=Request('GET', url).prepare(),
+        )
+        with patch.object(Session, 'send', side_effect=AssertionError('Unexpected network call')):
+            response = session.get(url, only_if_cached=True)
+        assert response.status_code == 504
 
 
 @pytest.mark.parametrize('query', ['b=2&a=1', 'q=hello%20world&a=1'])
