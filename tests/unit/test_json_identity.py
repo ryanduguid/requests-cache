@@ -8,7 +8,14 @@ import pytest
 from requests import Request
 
 from requests_cache import CachedRequest, CachedResponse, CachedSession, init_serializer
-from requests_cache.cache_keys import create_key, normalize_json_body, normalize_request
+from requests_cache.cache_keys import (
+    create_key,
+    normalize_json_body,
+    normalize_request,
+    redact_response,
+)
+from requests_cache.policy.actions import CacheActions
+from requests_cache.policy.settings import CacheSettings
 
 
 def prepared(body, content_type='application/json'):
@@ -288,3 +295,118 @@ def test_response_json_without_optional_encoder(monkeypatch):
     )
     serializer = init_serializer('json', decode_content=True)
     assert serializer.loads(serializer.dumps(response)).content == response.content
+
+
+@pytest.mark.parametrize(
+    'body',
+    [
+        b'{"n":9007199254740993}',
+        b'{"n":1e200}',
+        b'{"n":1e-200}',
+        b'{"n":1}',
+        b'{"n":1.0}',
+        b'{"n":-0.0}',
+        b'[1,2,3]',
+        b'1.25',
+    ],
+)
+@pytest.mark.parametrize('stdlib_encoder', [False, True])
+def test_dynamodb_numbers_keep_original_body(body, stdlib_encoder, monkeypatch):
+    pytest.importorskip('boto3')
+    from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
+    from requests_cache.serializers import cattrs, dynamodb_document_serializer
+
+    if stdlib_encoder:
+        monkeypatch.setattr(cattrs, 'json', json)
+    serializer = init_serializer(dynamodb_document_serializer, decode_content=True).copy()
+    response = CachedResponse(content=body, headers={'Content-Type': 'application/json'})
+    stored = serializer.dumps(response)
+    assert '_content' in stored and '_decoded_content' not in stored
+    sdk_value = TypeDeserializer().deserialize(TypeSerializer().serialize(stored))
+    assert serializer.loads(sdk_value).content == body
+
+
+@pytest.mark.parametrize('body', [b'{"s":"value"}', b'["a",false]', b'"text"'])
+def test_dynamodb_number_free_json_stays_readable(body):
+    pytest.importorskip('boto3')
+    from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
+    from requests_cache.serializers import dynamodb_document_serializer
+
+    serializer = init_serializer(dynamodb_document_serializer, decode_content=True)
+    response = CachedResponse(content=body, headers={'Content-Type': 'application/json'})
+    stored = serializer.dumps(response)
+    assert '_decoded_content' in stored and '_content' not in stored
+    restored = serializer.loads(TypeDeserializer().deserialize(TypeSerializer().serialize(stored)))
+    assert json.loads(restored.content) == json.loads(body)
+
+
+@pytest.mark.parametrize('serializer_name', ['json', 'ujson', 'orjson', 'bson', 'yaml', 'pickle'])
+@pytest.mark.parametrize('body', [b'{"s":"\\ud800"}', b'{"\\u0000":"value"}', b'["\\udfff"]'])
+def test_decoded_json_unsupported_strings_keep_body(serializer_name, body):
+    if serializer_name not in ('json', 'pickle'):
+        pytest.importorskip(serializer_name)
+    serializer = init_serializer(serializer_name, decode_content=True)
+    response = CachedResponse(content=body, headers={'Content-Type': 'application/json'})
+    assert serializer.loads(serializer.dumps(response)).content == body
+
+
+@pytest.mark.parametrize(
+    'current_body, final_body, current_root, expected',
+    [
+        (b'{"data":{"z":1,"a":2}}', b'{"data":{"z":1,"a":2}}', 'data', True),
+        (b'{"data":["keep"]}', b'{"data":["secret","keep"]}', 'data', False),
+        (b'{"data":["keep"]}', b'{"data":["secret","keep"]}', None, False),
+        (b'{"data":[]}', b'{"data":["secret"]}', 'data', False),
+        (b'["keep"]', b'["secret","keep"]', 'missing', False),
+    ],
+)
+def test_selected_root_redirect_identity(current_body, final_body, current_root, expected):
+    current, final = prepared(current_body), prepared(final_body)
+    current.headers['Cookie'] = final.headers['Cookie'] = 'sid=fixture'
+    response = CachedResponse(
+        request=CachedRequest.from_request(final),
+        status_code=200,
+        headers={'Vary': 'Cookie'},
+        history=[
+            CachedResponse(status_code=307, request=CachedRequest(url='https://example.com/start'))
+        ],
+    )
+    redact_response(response, ['secret'], 'data')
+    settings = CacheSettings(
+        ignored_parameters=['secret'],
+        content_root_key=current_root,
+        allowable_methods=('GET', 'POST'),
+        only_if_cached=True,
+    )
+    actions = CacheActions.from_request('fixture-key', current, settings)
+    actions.update_from_cached_response(response, lambda *_args, **_kwargs: 'constant-key')
+    assert actions.error_504 is not expected
+    assert not actions.send_request and not actions.resend_request
+
+
+def test_one_shot_ignored_parameters_cover_all_request_parts():
+    request = Request(
+        'POST',
+        'https://example.com/?secret=fixture-query',
+        data=b'{"secret":"fixture-body"}',
+        headers={'Content-Type': 'application/json', 'secret': 'fixture-header'},
+    ).prepare()
+    result = normalize_request(request, iter(['secret']))
+    assert result.url.endswith('secret=REDACTED')
+    assert result.headers['secret'] == 'REDACTED'
+    assert json.loads(result.body) == {'secret': 'REDACTED'}
+    response = CachedResponse(request=CachedRequest.from_request(request), url=request.url)
+    redact_response(response, iter(['secret']))
+    assert response.request.headers['secret'] == 'REDACTED'
+    assert json.loads(response.request.body) == {'secret': 'REDACTED'}
+
+
+def test_one_shot_settings_remain_available_for_later_requests():
+    with CachedSession(backend='memory', ignored_parameters=iter(['secret'])) as session:
+        session.trust_env = False
+        for i in range(2):
+            request = prepared('{"secret":"fixture-' + str(i) + '"}')
+            key = session.cache.create_key(request)
+            response = CachedResponse(request=CachedRequest.from_request(request), status_code=200)
+            session.cache.save_response(response, key)
+            assert json.loads(session.cache.responses[key].request.body) == {'secret': 'REDACTED'}

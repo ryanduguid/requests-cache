@@ -134,6 +134,7 @@ def normalize_request(
         ignored_parameters: Request parameters, headers, and/or JSON body params to exclude
         content_root_key: root element in the request body to apply ignored_parameters to
     """
+    ignored_parameters = tuple(ignored_parameters or ())
     if isinstance(request, Request):
         # For a multipart POST request that hasn't been prepared, we need to patch the form boundary
         # so the request body will have a consistent hash
@@ -266,6 +267,7 @@ def redact_response(
     response: CachedResponse, ignored_parameters: ParamList, content_root_key: Optional[str] = None
 ) -> CachedResponse:
     """Redact any ignored parameters (potentially containing sensitive info) from a cached request"""
+    ignored_parameters = tuple(ignored_parameters or ())
     if ignored_parameters:
         for cached_response in [response, *response.history]:
             cached_response.url = filter_url(cached_response.url, ignored_parameters)

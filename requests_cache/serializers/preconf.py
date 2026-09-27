@@ -172,7 +172,7 @@ except ImportError as e:
 
 # DynamoDB document serializer
 dynamodb_preconf_stage = CattrStage(
-    factory=make_decimal_timedelta_converter, convert_timedelta=False
+    factory=make_decimal_timedelta_converter, convert_timedelta=False, allow_json_numbers=False
 )  #: Pre-serialization steps for DynamoDB
 convert_float_stage = Stage(dumps=_convert_floats, loads=lambda x: x)
 dynamodb_document_serializer = SerializerPipeline(

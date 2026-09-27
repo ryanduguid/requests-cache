@@ -1,13 +1,19 @@
 # History
 
 ## Unreleased
+* Protect shared SQLite reads, cursors and transactions from concurrent connection use.
+  Release iterator cursors before yielding and preserve false-valued cached responses and zero limits.
+  Roll back failed transactions, report their errors and reject transaction-breaking lifecycle calls.
+  Bind lookup keys and treat truncated pickles as invalid cache entries.
 * Preserve query and form values, empty fields and percent-encoded bytes during normalisation.
   Keep literal plus signs distinct from spaces and avoid normalising query values twice.
   Default keys use a new namespace: start with a fresh cache, including redirect aliases.
   Recreating keys cannot recover values lost from older stored requests.
 * Preserve JSON request numbers and scalar types while redacting ignored values, including
   selected roots in stored redirects and requests with an ignored Content-Type header.
-  Keep response body bytes when decoded JSON would lose precision, duplicate members or `null`.
+  Retain ignored-parameter iterators across requests and preserve selected-root redirect identity.
+  Keep response body bytes when decoded JSON would lose precision, duplicate members or `null`,
+  including numeric DynamoDB bodies and strings unsupported by built-in storage formats.
 * Match `Vary: Cookie` against the sent header and reject wildcard members and redacted comparisons.
   Redact ignored request cookie jars and redirect snapshots without changing live requests.
   Redirect aliases must match the available final method, normalised URL and body before reuse.

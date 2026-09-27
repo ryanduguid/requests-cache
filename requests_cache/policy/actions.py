@@ -1,3 +1,4 @@
+import json
 from collections import Counter
 from datetime import datetime, timedelta
 from logging import DEBUG, getLogger
@@ -415,8 +416,16 @@ class CacheActions(RichMixin):
             # Form normalisation may have erased a nonempty body such as 'x='.
             if not cached_request.body and int(cached_request.headers.get('Content-Length', '0')):
                 return False
-            cached = normalize_request(cached_request, ignored_parameters=None)
-            current = normalize_request(self._request, ignored_parameters=None)
+            cached = normalize_request(
+                cached_request,
+                ignored_parameters=None,
+                content_root_key=self._settings.content_root_key,
+            )
+            current = normalize_request(
+                self._request,
+                ignored_parameters=None,
+                content_root_key=self._settings.content_root_key,
+            )
         except (TypeError, ValueError):
             return False
         cached_body = encode(cached.body)
@@ -429,10 +438,10 @@ class CacheActions(RichMixin):
         content_type = decode(cached.headers.get('Content-Type', ''), encoding='latin-1')
         if cached_body and content_type == 'REDACTED':
             return False
-        # ponytail: Stored JSON arrays may have lost ignored values; provenance is needed to reuse them.
+        # ponytail: Arrays may lose values under an earlier root setting; reuse needs provenance.
         if is_json_content_type(
             content_type.split(';', 1)[0].lower()
-        ) and cached_body.lstrip().startswith(b'['):
+        ) and _has_ambiguous_json_array(cached_body):
             return False
 
         return (current.method, current.url, encode(current.body)) == (
@@ -495,6 +504,17 @@ def _log_vary_diff(
     headers_2 = normalize_headers(headers_2)
     nonmatching = [k for k in vary if headers_1.get(k) != headers_2.get(k)]
     logger.debug(f'Failed Vary check. Non-matching headers: {", ".join(nonmatching)}')
+
+
+def _has_ambiguous_json_array(body: bytes) -> bool:
+    try:
+        data = json.loads(body, parse_int=str, parse_float=str)
+    except ValueError:
+        return False
+    # A previous content_root_key can name any immediate member, even if settings later change.
+    return isinstance(data, list) or (
+        isinstance(data, dict) and any(isinstance(value, list) for value in data.values())
+    )
 
 
 def _log_cache_criteria(operation: str, criteria: Dict):

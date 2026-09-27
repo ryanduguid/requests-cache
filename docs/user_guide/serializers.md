@@ -114,8 +114,12 @@ pip install requests-cache[mongodb]
 ```
 
 ## Response Content Format
-By default, any JSON or text response body will be decoded, so the response is fully
-human-readable/editable. Other content types will be saved as binary data. To save _all_ content as binary, set ``decode_content=False``:
+By default, JSON and text response bodies are decoded when their values can be stored safely.
+JSON bodies retain their original bytes when decoding would lose numeric precision, duplicate
+object members or `null`, or when strings or member names are unsupported by a built-in storage
+format. The DynamoDB serialiser retains the bytes for any JSON body containing numbers.
+Other content types are stored as binary data. To save _all_ content as binary, set
+``decode_content=False``:
 ```python
 >>> backend = FileCache(decode_content=False)
 >>> session = CachedSession('http_cache', backend=backend)

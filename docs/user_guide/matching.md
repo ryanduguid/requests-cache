@@ -47,6 +47,7 @@ Python float without changing their decimal value retain their original spelling
 spellings of those numbers may produce separate entries. Array order is preserved. Duplicate
 object members retain the last value, as in Python's JSON decoder.
 `content_root_key` applies filtering to the selected root in both keys and stored requests.
+An iterator passed as `ignored_parameters` is retained for subsequent requests.
 Malformed JSON passes through unchanged; its fields are not redacted.
 
 **Request Headers:**
@@ -107,8 +108,9 @@ Use `match_headers=['Cookie']` to retain different Cookie variants separately.
 For responses with redirect history and `Vary: Cookie`, only a request matching the final method,
 normalised URL and body can reuse the cached response directly. Requests through other redirect
 aliases must follow the redirects again; cache-only requests return 504.
-The final identity must still be available. Redacted values, streamed bodies and JSON-array bodies
-cannot establish that match; arrays may have lost ignored values without a redaction marker.
+The final identity must still be available. Redacted values, streamed bodies and JSON arrays cannot
+establish that match. This includes arrays in immediate object members, since a previous
+`content_root_key` setting may have removed ignored values without a redaction marker.
 If a nominated value or the `Vary` field itself was redacted, the cached response cannot be reused.
 
 
