@@ -228,20 +228,18 @@ class CacheMixin(MIXIN_BASE):
         # try a Vary-qualified key before going to the origin server.
         if actions.vary_cache_key:
             vary_key = actions.vary_cache_key
-            vary_cached = self.cache.get_response(vary_key)
+            cached_response = self.cache.get_response(vary_key)
             # Use the Vary-qualified key for any future storage (hit or miss)
             actions.cache_key = vary_key
-            if vary_cached is not None:
-                # Reset decision flags from the failed primary Vary check
-                actions.send_request = False
-                actions.resend_request = False
-                actions.resend_async = False
-                actions.error_504 = False
-                actions.vary_cache_key = None
-                actions._validation_headers = {}
-                # Re-evaluate freshness/expiry with the Vary-matched response
-                actions.update_from_cached_response(vary_cached, self.cache.create_key, **kwargs)
-                cached_response = vary_cached
+            # Reset decisions from the failed primary Vary check.
+            actions.send_request = False
+            actions.resend_request = False
+            actions.resend_async = False
+            actions.error_504 = False
+            actions.vary_cache_key = None
+            actions._validation_headers = {}
+            # Re-evaluate the secondary candidate, including a cache miss.
+            actions.update_from_cached_response(cached_response, self.cache.create_key, **kwargs)
 
         # Handle missing and expired responses based on settings and headers
         if actions.error_504:
@@ -256,9 +254,12 @@ class CacheMixin(MIXIN_BASE):
         else:
             response = cached_response  # type: ignore  # Guaranteed to be non-None by this point
 
-        # Delete filtered entries only when they belong to this request variant.
+        # Preserve a mismatching candidate unless a new response replaced it.
+        preserve_vary_candidate = actions.vary_mismatch and (
+            actions.error_504 or actions.skip_write
+        )
         if (
-            not actions.vary_mismatch
+            not preserve_vary_candidate
             and self.settings.filter_fn is not None
             and not self.settings.filter_fn(response)
         ):

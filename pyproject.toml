@@ -62,7 +62,7 @@ all = [
     'boto3          >=1.15',
     'botocore       >=1.18',
     'itsdangerous   >=2.0',
-    'orjson         >=3.0; python_version < "3.14"',
+    'orjson         >=3.0; python_version < "3.14" and implementation_name == "cpython"',
     'pymongo        >=3',
     'pyyaml         >=6.0.1',
     'redis          >=3',

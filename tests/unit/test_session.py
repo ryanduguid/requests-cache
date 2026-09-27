@@ -1084,16 +1084,40 @@ def test_request__vary_miss_preserves_filtered_entry(
         'GET', MOCKED_URL, headers={'Vary': vary}, text='first variant'
     )
     first = mock_session.get(MOCKED_URL, **first_kwargs)
-    mock_session.settings.filter_fn = lambda response: response.status_code == 200
-    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, status_code=403)
+    mock_session.settings.filter_fn = lambda response: response.text == 'first variant'
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, text='rejected replacement')
 
     response = mock_session.get(MOCKED_URL, only_if_cached=only_if_cached, **next_kwargs)
 
-    assert response.status_code == (504 if only_if_cached else 403)
+    assert response.status_code == (504 if only_if_cached else 200)
     assert mock_session.mock_adapter.call_count == (1 if only_if_cached else 2)
     saved = mock_session.cache.get_response(first.cache_key)
     assert saved is not None
     assert saved.text == 'first variant'
+
+
+@pytest.mark.parametrize(
+    'vary, accept_write', [('*', True), ('Accept-Language', True), ('Accept-Language', False)]
+)
+def test_vary_miss__filters_network_result(mock_session, vary, accept_write):
+    """Keep final filtering after a write or a lookup of an empty secondary slot."""
+    mock_session.trust_env = False
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': vary})
+    first = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'})
+    filtered = []
+
+    def filter_response(response):
+        filtered.append(response)
+        return accept_write and len(filtered) == 1
+
+    mock_session.settings.filter_fn = filter_response
+    response = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'fr'})
+
+    assert response.status_code == 200
+    assert len(filtered) == 2
+    assert mock_session.cache.get_response(response.cache_key) is None
+    if vary == 'Accept-Language':
+        assert mock_session.cache.get_response(first.cache_key) is not None
 
 
 @pytest.mark.parametrize('variant', ['plain', 'primary', 'secondary'])

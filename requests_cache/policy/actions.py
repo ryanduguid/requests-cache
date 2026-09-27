@@ -200,13 +200,12 @@ class CacheActions(RichMixin):
             key_kwargs: Additional keyword arguments for ``create_key``.
         """
         # A Vary mismatch is a cache miss, regardless of freshness.
-        self.vary_mismatch = False
-        if (
+        self.vary_mismatch = bool(
             cached_response is not None
             and create_key
             and not self._validate_vary(cached_response, create_key, **key_kwargs)
-        ):
-            self.vary_mismatch = True
+        )
+        if self.vary_mismatch:
             cached_response = None
 
         usable_response = self.is_usable(cached_response)
