@@ -1,6 +1,8 @@
 # History
 
 ## Unreleased
+* Require Python 3.10+ and patched Requests, urllib3, UltraJSON and orjson releases.
+  Remove vulnerable legacy-Python lock entries and update the supported test matrices.
 * Separate cache-key fields and preserve JSON array order and header values when matching.
   Existing keys change: clear the cache or use `session.cache.recreate_keys()` to reuse stored responses.
 * Redact ignored header names regardless of case and ignored JSON fields above the normalisation size limit.

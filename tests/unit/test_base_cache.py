@@ -358,9 +358,11 @@ def test_urls__error(mock_session):
 
 
 def test_remove_expired_responses(mock_session):
-    with ignore_deprecation(), patch.object(
-        mock_session.cache, 'delete'
-    ) as mock_delete, patch.object(mock_session.cache, 'reset_expiration') as mock_reset:
+    with (
+        ignore_deprecation(),
+        patch.object(mock_session.cache, 'delete') as mock_delete,
+        patch.object(mock_session.cache, 'reset_expiration') as mock_reset,
+    ):
         mock_session.cache.remove_expired_responses(expire_after=1)
         mock_delete.assert_called_once_with(expired=True, invalid=True)
         mock_reset.assert_called_once_with(1)

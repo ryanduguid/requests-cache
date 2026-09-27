@@ -24,5 +24,5 @@ _Is there an existing workaround for this issue?_
 
 ### Environment
 - requests-cache version: (for example, `0.9.5` or `main`)
-- Python version: (for example, `3.9`)
+- Python version: (for example, `3.10`)
 - Platform: (for example, Debian 10)
