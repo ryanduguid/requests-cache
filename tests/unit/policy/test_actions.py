@@ -479,6 +479,27 @@ def test_vary_cookie__same_url_redirect_request_identity(method):
     assert not actions.resend_request
 
 
+@pytest.mark.parametrize('history', [False, True])
+@pytest.mark.parametrize('value', [b'@@@SKIP_HEADER@@@', '@@@SKIP_HEADER@@@'])
+def test_vary_cookie__transport_control(history, value):
+    other = value.decode() if isinstance(value, bytes) else value.encode()
+    cached = Request('GET', 'https://example.com/', headers={'Cookie': value}).prepare()
+    current = Request('GET', cached.url, headers={'Cookie': other}).prepare()
+    response = CachedResponse(
+        status_code=200,
+        request=CachedRequest.from_request(cached),
+        headers={'Vary': 'Cookie'},
+        history=[CachedResponse(status_code=302)] if history else [],
+    )
+    actions = CacheActions.from_request('fixture-key', current, CacheSettings(only_if_cached=True))
+
+    actions.update_from_cached_response(response, create_key)
+
+    assert actions.error_504
+    assert not actions.send_request
+    assert not actions.resend_request
+
+
 @pytest.mark.parametrize(
     'current, final, ignored, expected',
     [

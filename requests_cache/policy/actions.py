@@ -443,15 +443,15 @@ class CacheActions(RichMixin):
 
     def _cookies_match(self, cached_request: 'CachedRequest') -> bool:
         """Compare sent Cookie headers, retaining jar checks only for two headerless requests."""
-        cached_headers = CaseInsensitiveDict(cached_request.headers or {})
-        current_headers = CaseInsensitiveDict(self._request.headers or {})
+        cached_headers = normalize_headers(cached_request.headers or {})
+        current_headers = normalize_headers(self._request.headers or {})
         cached_field = (
             'Cookie' in cached_headers,
-            decode(cached_headers.get('Cookie'), encoding='latin-1'),
+            cached_headers.get('Cookie'),
         )
         current_field = (
             'Cookie' in current_headers,
-            decode(current_headers.get('Cookie'), encoding='latin-1'),
+            current_headers.get('Cookie'),
         )
         if cached_field[0] or current_field[0]:
             return cached_field == current_field

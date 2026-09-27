@@ -29,7 +29,7 @@ from requests.exceptions import RequestException
 from requests.structures import CaseInsensitiveDict
 from urllib3.util import SKIP_HEADER  # type: ignore[attr-defined]
 
-from .._utils import is_json_content_type
+from .._utils import decode, is_json_content_type
 from ..models import CachedResponse, DecodedContent
 from .pipeline import Stage
 
@@ -209,7 +209,7 @@ def make_decimal_timedelta_converter(**kwargs) -> Converter:
 
 def _decode_content(response: CachedResponse, response_dict: Dict) -> Dict:
     """Decode response body into a human-readable format, if possible"""
-    ct_header = response.headers.get('Content-Type', '')
+    ct_header = decode(response.headers.get('Content-Type', ''), encoding='latin-1')
 
     # Decode body as JSON
     if is_json_content_type(ct_header):
@@ -237,7 +237,7 @@ def _encode_content(response: CachedResponse) -> CachedResponse:
         return response
 
     # Encode body as JSON
-    if is_json_content_type(response.headers.get('Content-Type')):
+    if is_json_content_type(decode(response.headers.get('Content-Type'), encoding='latin-1')):
         response._decoded_content = json.dumps(response._decoded_content)
 
     # Encode body back to bytes

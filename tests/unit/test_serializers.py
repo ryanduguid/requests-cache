@@ -27,7 +27,7 @@ from requests_cache import (
     init_serializer,
 )
 from tests.conftest import skip_missing_deps
-from requests_cache.cache_keys import normalize_request
+from requests_cache.cache_keys import normalize_request, normalize_headers
 
 
 @pytest.mark.parametrize('serializer_name', ['json', 'ujson', 'orjson', 'pickle', 'yaml', 'bson'])
@@ -153,6 +153,36 @@ def test_json_header_conversion_preserves_body(serializer_name, decode_content, 
     else:
         assert stored['_content'] == b64encode(body).decode()
         assert '_decoded_content' not in stored
+
+
+@pytest.mark.parametrize('serializer_name', ['json', 'ujson', 'orjson', 'pickle', 'yaml', 'bson'])
+@pytest.mark.parametrize('normalise', [False, True])
+@pytest.mark.parametrize(
+    'content_type, body',
+    [
+        (b'application/json', b'{"fixture":1}'),
+        (b'text/plain', b'calf\xc3\xa9'),
+        (b'application/octet-stream', b'\x00\xff'),
+        (SKIP_HEADER.encode(), b'\x00\xff'),
+    ],
+)
+def test_decode_content__byte_content_type(serializer_name, normalise, content_type, body):
+    if serializer_name not in ('json', 'pickle'):
+        pytest.importorskip(serializer_name)
+    headers = {'Content-Type': content_type}
+    if normalise:
+        headers = normalize_headers(headers, ignored_parameters=['unused'])
+    response = CachedResponse(content=body, encoding='utf-8', headers=headers)
+    serializer = init_serializer(serializer_name, decode_content=True)
+
+    restored = serializer.loads(serializer.dumps(response))
+
+    assert restored.content == body
+    assert response.headers == headers
+    if serializer_name in ('pickle', 'yaml', 'bson') or content_type == SKIP_HEADER.encode():
+        assert restored.headers == headers
+    else:
+        assert restored.headers['Content-Type'] == content_type.decode('latin-1')
 
 
 @skip_missing_deps('orjson')
