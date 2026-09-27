@@ -1,3 +1,4 @@
+from collections import Counter
 from datetime import datetime, timedelta
 from logging import DEBUG, getLogger
 from typing import TYPE_CHECKING, Dict, List, Mapping, MutableMapping, Optional, Union
@@ -340,37 +341,32 @@ class CacheActions(RichMixin):
         vary = cached_response.headers.get('Vary')
         if not vary:
             return True
-        elif vary == '*':
+        elif vary == 'REDACTED':
             return False
 
         # Generate a secondary cache key based on Vary for both the cached request and new request.
         # If there are redirects, compare the new request against the last request in the chain.
         match_headers = [k.strip().lower() for k in vary.split(',')]
+        if '*' in match_headers:
+            return False
         vary_request = (
             cached_response.history[-1].request
             if cached_response.history
             else cached_response.request
         )
 
-        # Handle 'Vary: Cookie' separately since requests doesn't store cookies with other headers
+        if not self._vary_headers_available(vary_request, match_headers):
+            return False
+
+        # The prepared Cookie header records what was sent; the jar may contain unsent cookies.
         if 'cookie' in match_headers:
             if not self._cookies_match(vary_request):
                 logger.debug('Failed Vary check: cookies do not match')
                 return False
-            match_headers.remove('cookie')
+            match_headers = [h for h in match_headers if h != 'cookie']
 
         if not match_headers:
             return True
-
-        # If a Vary header is in ignored_parameters and on the request, treat it as a cache miss
-        # rather than potentially returning an invalid response
-        ignored = {h.lower() for h in (self._settings.ignored_parameters or [])}
-        ignore_overlap = ignored & set(match_headers)
-        if ignore_overlap and any(h in self._request.headers for h in ignore_overlap):
-            logger.debug(
-                f'Failed Vary check: Vary header(s) are in ignored_parameters: {ignore_overlap}'
-            )
-            return False
 
         key_kwargs['match_headers'] = match_headers
         vary_key_cached = create_key(vary_request, **key_kwargs)
@@ -388,16 +384,37 @@ class CacheActions(RichMixin):
             self.vary_cache_key = create_key(self._request, **key_kwargs)
         return headers_match
 
+    def _vary_headers_available(
+        self, cached_request: 'CachedRequest', match_headers: List[str]
+    ) -> bool:
+        """Reject comparisons whose nominated header values were or will be redacted."""
+        cached_headers = CaseInsensitiveDict(cached_request.headers or {})
+        current_headers = CaseInsensitiveDict(self._request.headers or {})
+        ignored = {h.lower() for h in (self._settings.ignored_parameters or [])}
+        ignore_overlap = ignored & set(match_headers)
+        if any(h in cached_headers or h in current_headers for h in ignore_overlap):
+            logger.debug(
+                f'Failed Vary check: Vary header(s) are in ignored_parameters: {ignore_overlap}'
+            )
+            return False
+        return all(cached_headers.get(h) != 'REDACTED' for h in match_headers)
+
     def _cookies_match(self, cached_request: 'CachedRequest') -> bool:
-        """Compare cookies between the current request and cached request for Vary: Cookie"""
+        """Compare sent Cookie headers, retaining jar checks only for two headerless requests."""
+        cached_headers = CaseInsensitiveDict(cached_request.headers or {})
+        current_headers = CaseInsensitiveDict(self._request.headers or {})
+        cached_field = ('Cookie' in cached_headers, cached_headers.get('Cookie'))
+        current_field = ('Cookie' in current_headers, current_headers.get('Cookie'))
+        if cached_field[0] or current_field[0]:
+            return cached_field == current_field
+        if 'cookie' in {h.lower() for h in (self._settings.ignored_parameters or [])}:
+            return True
 
-        def normalize_cookies(cookies: Optional[Mapping]) -> str:
-            cookie_list = [f'{k}={v}' for k, v in (cookies or {}).items()]
-            return '; '.join(sorted(cookie_list))
-
-        cached_cookies = normalize_cookies(cached_request.cookies)
-        request_cookies = normalize_cookies(getattr(self._request, '_cookies', None))
-        return request_cookies == cached_cookies
+        cached_cookies: Mapping[str, Optional[str]] = cached_request.cookies or {}
+        request_cookies = getattr(self._request, '_cookies', None) or {}
+        if not isinstance(cached_cookies, Mapping) or not isinstance(request_cookies, Mapping):
+            return False
+        return Counter(request_cookies.items()) == Counter(cached_cookies.items())
 
     def _merge_match_headers(self, vary_headers: List[str]) -> Union[List[str], bool]:
         """Merge Vary headers with user-configured match_headers to build a complete

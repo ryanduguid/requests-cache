@@ -406,6 +406,117 @@ def test_match_headers__vary_alternating(mock_session):
     assert mock_session.get(MOCKED_URL_VARY, headers=headers_html).from_cache is True
 
 
+@pytest.mark.parametrize(
+    'first_kwargs, next_kwargs, expected_hit',
+    [
+        ({'headers': {'Cookie': 'theme=light'}}, {'headers': {'Cookie': 'theme=dark'}}, False),
+        ({'headers': {'Cookie': 'theme=light'}}, {'headers': {'Cookie': 'theme=light'}}, True),
+        ({'headers': {'Cookie': 'theme=light'}}, {}, False),
+        ({}, {'headers': {'Cookie': 'theme=light'}}, False),
+        ({'headers': {'Cookie': ''}}, {}, False),
+        ({}, {'headers': {'Cookie': ''}}, False),
+        (
+            {'headers': {'Cookie': 'theme=light'}, 'cookies': {'jar': 'same'}},
+            {'headers': {'Cookie': 'theme=dark'}, 'cookies': {'jar': 'same'}},
+            False,
+        ),
+        (
+            {'headers': {'Cookie': 'theme=light'}, 'cookies': {'jar': 'first'}},
+            {'headers': {'Cookie': 'theme=light'}, 'cookies': {'jar': 'second'}},
+            True,
+        ),
+        (
+            {'headers': {'Cookie': 'theme=light; theme=dark'}},
+            {'headers': {'Cookie': 'theme=dark; theme=light'}},
+            False,
+        ),
+        (
+            {'headers': {'Cookie': 'label="blue; red"'}},
+            {'headers': {'Cookie': 'label="blue; green"'}},
+            False,
+        ),
+    ],
+)
+def test_match_headers__vary_cookie_header(mock_session, first_kwargs, next_kwargs, expected_hit):
+    """Match the Cookie header sent on the wire, including explicit jar overrides."""
+    mock_session.trust_env = False
+    mock_session.mock_adapter.register_uri(
+        'GET', MOCKED_URL, headers={'Vary': 'Cookie'}, text='first variant'
+    )
+    mock_session.get(MOCKED_URL, **first_kwargs)
+
+    response = mock_session.get(MOCKED_URL, only_if_cached=True, **next_kwargs)
+
+    assert response.status_code == (200 if expected_hit else 504)
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('vary', ['*', ' * ', '*, Accept-Language', 'Accept-Language, *'])
+def test_match_headers__vary_wildcard_member(mock_session, vary):
+    mock_session.trust_env = False
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': vary})
+    mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'})
+
+    response = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'}, only_if_cached=True)
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('vary', ['Cookie', 'Cookie, Accept-Language'])
+def test_match_headers__vary_ignored_cookie(mock_session, vary):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['cOoKiE']
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': vary})
+    mock_session.get(MOCKED_URL, headers={'Cookie': 'theme=light'})
+
+    response = mock_session.get(MOCKED_URL, headers={'Cookie': 'REDACTED'}, only_if_cached=True)
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('vary', ['Cookie', '*'])
+def test_match_headers__vary_redacted_metadata(mock_session, vary):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Vary']
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': vary})
+    mock_session.get(MOCKED_URL, headers={'Cookie': 'theme=light'})
+    mock_session.settings.ignored_parameters = []
+
+    response = mock_session.get(MOCKED_URL, headers={'Cookie': 'theme=light'}, only_if_cached=True)
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('header', ['Cookie', 'Authorization'])
+def test_match_headers__vary_redacted_value(mock_session, header):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = [header]
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': header})
+    mock_session.get(MOCKED_URL, headers={header: 'fabricated-value'})
+    mock_session.settings.ignored_parameters = []
+
+    response = mock_session.get(MOCKED_URL, headers={header: 'REDACTED'}, only_if_cached=True)
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+
+
+def test_ignored_cookie_jar_is_not_saved(mock_session):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Cookie']
+    original_response = mock_session.get(MOCKED_URL, cookies={'theme': 'light'})
+
+    cached_response = mock_session.cache.responses[original_response.cache_key]
+
+    assert cached_response.request.headers['Cookie'] == 'REDACTED'
+    assert not cached_response.request.cookies
+    assert original_response.request.headers['Cookie'] == 'theme=light'
+    assert original_response.request._cookies['theme'] == 'light'
+
+
 def test_match_headers__vary_authorization(mock_session):
     """When Vary headers overlaps with ignored_parameters and the header is present on the
     request, it's always a cache miss (prevents cross-user cache leakage).

@@ -418,7 +418,7 @@ def test_vary_cache_key__match_all():
         ({'session': 'abc123'}, {'session': 'abc123'}, True),
         ({'session': 'abc123'}, {'session': 'xyz789'}, False),
         ({'session': 'abc', 'user': 'bob'}, {'session': 'abc', 'user': 'bob'}, True),
-        ({'user': 'bob', 'session': 'abc'}, {'session': 'abc', 'user': 'bob'}, True),
+        ({'user': 'bob', 'session': 'abc'}, {'session': 'abc', 'user': 'bob'}, False),
         ({'session': 'abc', 'user': 'bob'}, {'session': 'abc', 'user': 'alice'}, False),
         ({}, {}, True),
         ({'session': 'abc123'}, {}, False),
@@ -431,11 +431,8 @@ def test_update_from_cached_response__vary_cookie(cached_cookies, new_cookies, e
     new_cookiejar = RequestsCookieJar()
     new_cookiejar.update(new_cookies)
 
-    # Cached response with cookies
-    cached_request = CachedRequest(
-        method='GET',
-        url='https://site.com/page',
-        cookies=cached_cookiejar,
+    cached_request = CachedRequest.from_request(
+        Request('GET', 'https://site.com/page', cookies=cached_cookiejar).prepare()
     )
     cached_response = CachedResponse(
         headers={'Vary': 'Cookie'},
@@ -460,11 +457,13 @@ def test_update_from_cached_response__vary_cookie_and_headers():
     new_cookiejar.set('session', 'abc123')
 
     # Cached response with Vary: Cookie, Accept
-    cached_request = CachedRequest(
-        method='GET',
-        url='https://site.com/page',
-        headers={'Accept': 'application/json'},
-        cookies=cached_cookiejar,
+    cached_request = CachedRequest.from_request(
+        Request(
+            'GET',
+            'https://site.com/page',
+            headers={'Accept': 'application/json'},
+            cookies=cached_cookiejar,
+        ).prepare()
     )
     cached_response = CachedResponse(
         headers={'Vary': 'Cookie, Accept'},
@@ -487,6 +486,81 @@ def test_update_from_cached_response__vary_cookie_and_headers():
     assert actions.send_request is True
     # Cookies match, so secondary key is set for the differing Accept header
     assert actions.vary_cache_key is not None
+
+
+@pytest.mark.parametrize(
+    'cached_pairs, current_pairs, expected_match',
+    [
+        ([('theme', 'light'), ('colour', 'blue')], [('colour', 'blue'), ('theme', 'light')], True),
+        ([('a', 'b; c=d')], [('a', 'b'), ('c', 'd')], False),
+        ([('theme', 'light'), ('theme', 'light')], [('theme', 'light')], False),
+        ([], [], True),
+    ],
+)
+def test_update_from_cached_response__vary_headerless_cookie_jars(
+    cached_pairs, current_pairs, expected_match
+):
+    requests = []
+    for pairs in (cached_pairs, current_pairs):
+        jar = RequestsCookieJar()
+        for index, (name, value) in enumerate(pairs):
+            jar.set(name, value, path=f'/{index}')
+        request = Request('GET', 'https://site.com/page', cookies=jar).prepare()
+        request.headers.pop('Cookie', None)
+        requests.append(request)
+    cached_response = CachedResponse(
+        headers={'Vary': 'Cookie'}, request=CachedRequest.from_request(requests[0])
+    )
+
+    actions = CacheActions.from_request('key', requests[1])
+    actions.update_from_cached_response(cached_response, create_key=create_key)
+
+    assert actions.send_request is not expected_match
+
+
+def test_update_from_cached_response__ignored_headerless_cookie_jars():
+    request = Request('GET', 'https://site.com/page').prepare()
+    cached_request = CachedRequest.from_request(request)
+    cached_request.cookies.set('theme', 'light')
+    cached_response = CachedResponse(headers={'Vary': 'Cookie, Cookie'}, request=cached_request)
+    actions = CacheActions.from_request(
+        'key', request, settings=CacheSettings(ignored_parameters=['Cookie'])
+    )
+
+    with patch.object(RequestsCookieJar, 'items', side_effect=AssertionError('Jar was inspected')):
+        actions.update_from_cached_response(cached_response, create_key=create_key)
+
+    assert actions.send_request is False
+
+
+@pytest.mark.parametrize('scope', ['domain', 'path'])
+@pytest.mark.parametrize('change_sent_cookie', [True, False])
+def test_update_from_cached_response__vary_cookie_scope(scope, change_sent_cookie):
+    requests = []
+    for current in (False, True):
+        jar = RequestsCookieJar()
+        sent_value = 'dark' if current and change_sent_cookie else 'light'
+        unsent_value = (
+            'light' if current and change_sent_cookie else ('blue' if current else 'dark')
+        )
+        jar.set('theme', sent_value, domain='site.com', path='/')
+        jar.set(
+            'theme',
+            unsent_value,
+            domain='other.com' if scope == 'domain' else 'site.com',
+            path='/elsewhere' if scope == 'path' else '/',
+        )
+        requests.append(Request('GET', 'https://site.com/page', cookies=jar).prepare())
+    cached_response = CachedResponse(
+        headers={'Vary': 'Cookie'}, request=CachedRequest.from_request(requests[0])
+    )
+
+    actions = CacheActions.from_request('key', requests[1])
+    actions.update_from_cached_response(cached_response, create_key=create_key)
+
+    assert requests[0].headers['Cookie'] == 'theme=light'
+    assert requests[1].headers['Cookie'] == ('theme=dark' if change_sent_cookie else 'theme=light')
+    assert actions.send_request is change_sent_cookie
 
 
 @pytest.mark.parametrize('max_stale, usable', [(5, False), (15, True)])

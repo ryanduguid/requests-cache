@@ -25,7 +25,8 @@ from typing import (
 )
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from requests import Request, Session
+from requests import PreparedRequest, Request, Session
+from requests.cookies import RequestsCookieJar
 from requests.structures import CaseInsensitiveDict
 from url_normalize import url_normalize
 
@@ -141,6 +142,7 @@ def normalize_request(
     norm_request.url = normalize_url(norm_request.url or '', ignored_parameters)
     norm_request.headers = normalize_headers(norm_request.headers, ignored_parameters)
     norm_request.body = normalize_body(norm_request, ignored_parameters, content_root_key)
+    _redact_cookie_jar(norm_request, ignored_parameters)
     return norm_request
 
 
@@ -245,7 +247,17 @@ def redact_response(response: CachedResponse, ignored_parameters: ParamList) -> 
         response.headers = normalize_headers(response.headers, ignored_parameters)
         response.request.headers = normalize_headers(response.request.headers, ignored_parameters)
         response.request.body = normalize_body(response.request, ignored_parameters)
+        _redact_cookie_jar(response.request, ignored_parameters)
     return response
+
+
+def _redact_cookie_jar(request: AnyPreparedRequest, ignored_parameters: ParamList):
+    if 'cookie' in {name.lower() for name in ignored_parameters or []}:
+        # CachedRequest may share this jar with the live request, so replace it instead of clearing it.
+        if isinstance(request, PreparedRequest):
+            request._cookies = RequestsCookieJar()  # type: ignore[attr-defined]
+        else:
+            request.cookies = RequestsCookieJar()
 
 
 def filter_sort_json(data: Union[List, Mapping], ignored_parameters: ParamList):

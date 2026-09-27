@@ -17,8 +17,47 @@ from requests_cache.cache_keys import (
     normalize_request,
     redact_response,
 )
+from requests_cache.models import CachedRequest, CachedResponse
 
 CACHE_KEY = 'da1b904fcb218852'
+
+
+@pytest.mark.parametrize('request_type', ['request', 'prepared', 'cached'])
+@pytest.mark.parametrize('ignored_header', ['Cookie', 'cOoKiE'])
+def test_normalize_request__ignored_cookie_jar(request_type, ignored_header):
+    request = Request('GET', 'https://example.com', cookies={'theme': 'light'})
+    if request_type != 'request':
+        request = request.prepare()
+    if request_type == 'cached':
+        request = CachedRequest.from_request(request)
+    original_jar = request.cookies if request_type == 'request' else request._cookies
+
+    normalised = normalize_request(request, ignored_parameters=[ignored_header])
+
+    assert normalised.headers['Cookie'] == 'REDACTED'
+    assert not normalised._cookies
+    assert original_jar['theme'] == 'light'
+    if request_type != 'request':
+        assert request.headers['Cookie'] == 'theme=light'
+
+
+@pytest.mark.parametrize('has_header', [True, False])
+def test_redact_response__ignored_cookie_jar(has_header):
+    original_request = Request('GET', 'https://example.com', cookies={'theme': 'light'}).prepare()
+    if not has_header:
+        del original_request.headers['Cookie']
+    response = CachedResponse(
+        url=original_request.url, request=CachedRequest.from_request(original_request)
+    )
+
+    redact_response(response, ['cOoKiE'])
+
+    assert not response.request.cookies
+    assert ('Cookie' in response.request.headers) is has_header
+    if has_header:
+        assert response.request.headers['Cookie'] == 'REDACTED'
+        assert original_request.headers['Cookie'] == 'theme=light'
+    assert original_request._cookies['theme'] == 'light'
 
 
 @pytest.mark.parametrize(

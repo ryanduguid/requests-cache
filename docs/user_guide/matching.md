@@ -50,6 +50,8 @@ As well as headers, if `match_headers=True` is used:
 ```
 ```{note}
 Since `ignored_parameters` is most often used for sensitive info like credentials, these values will also be removed from the cached request parameters, body, and headers.
+Ignoring `Cookie` also removes the stored request's cookie jar without changing the live request.
+Existing cache files are not scrubbed automatically.
 ```
 
 ```{tip}
@@ -66,9 +68,9 @@ In some cases, request header values can affect response content. For example, s
 i18n and [content negotiation](https://developer.mozilla.org/en-US/docs/Web/HTTP/Content_negotiation) may use the `Accept-Language` header to determine which language to serve content in.
 
 The server will ideally also send a `Vary` header in the response, which informs caches about
-which request headers to match. By default, requests-cache respects this: each unique combination
-of Vary-specified header values is cached separately, so alternating between variants (e.g.,
-different `Accept` values for content negotiation) works correctly without extra configuration.
+which request headers to match. Requests-cache checks those headers before reusing a response.
+Different values of headers such as `Accept` can be cached as separate variants.
+A `Vary` field containing `*` always prevents reuse, including when it lists other headers.
 Not all servers send `Vary`, however.
 ```
 
@@ -84,6 +86,9 @@ isn't available:
 If you want to match _all_ request headers, you can use `match_headers=True`.
 Header names are case-insensitive. Header values retain their case, whitespace and order,
 because their meaning depends on the server and header field.
+`Vary: Cookie` compares the exact sent header, including an explicit header that overrides a cookie jar.
+Use `match_headers=['Cookie']` to retain different Cookie variants separately.
+If a nominated value or the `Vary` field itself was redacted, the cached response cannot be reused.
 
 
 (custom-matching)=
