@@ -34,8 +34,8 @@ pip install requests-cache[all]
 ```
 
 ## Python Version Compatibility
-The latest version of requests-cache requires **python 3.8+**. If you need to use an older version
-of python, here are the latest compatible versions and their documentation pages:
+This fork requires **Python 3.10+** to use patched dependencies. The list below records older
+upstream compatibility; those releases may still depend on vulnerable packages.
 
 * **python 2.6:** [requests-cache 0.4.13](https://requests-cache.readthedocs.io/en/v0.4.13)
 * **python 2.7:** [requests-cache 0.5.2](https://requests-cache.readthedocs.io/en/v0.5.0)

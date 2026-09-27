@@ -23,8 +23,6 @@ classifiers = [
     'Development Status :: 5 - Production/Stable',
     'Intended Audience :: Developers',
     'Programming Language :: Python :: 3',
-    'Programming Language :: Python :: 3.8',
-    'Programming Language :: Python :: 3.9',
     'Programming Language :: Python :: 3.10',
     'Programming Language :: Python :: 3.11',
     'Programming Language :: Python :: 3.12',
@@ -34,12 +32,12 @@ classifiers = [
     'Topic :: Software Development :: Libraries :: Python Modules',
     'Typing :: Typed',
 ]
-requires-python = '>=3.8'
+requires-python = '>=3.10'
 
 # Required dependencies
 dependencies = [
-    'requests       >=2.22',   # Needs no introduction
-    'urllib3        >=1.25.5', # Use a slightly newer version than required by requests (for bugfixes)
+    'requests       >=2.33.0',
+    'urllib3        >=2.7.0',
     'attrs          >=21.2',   # For response data models
     'cattrs         >=22.2',   # For response serialization
     'platformdirs   >=2.5',    # For features that use platform-specific system directories
@@ -62,11 +60,11 @@ all = [
     'boto3          >=1.15',
     'botocore       >=1.18',
     'itsdangerous   >=2.0',
-    'orjson         >=3.0; python_version < "3.14" and implementation_name == "cpython"',
+    'orjson         >=3.11.6; python_version < "3.14" and implementation_name == "cpython"',
     'pymongo        >=3',
     'pyyaml         >=6.0.1',
     'redis          >=3',
-    'ujson          >=5.4',
+    'ujson          >=5.13.0',
 ]
 
 [dependency-groups]
@@ -74,13 +72,13 @@ all = [
 dev = [
     'coverage               >=7.2',
     'psutil                 >=5.0',
-    'pytest                 >=8.2',
+    'pytest                 >=9.0.3',
     'pytest-clarity         >=1.0.1',
     'pytest-cov             >=3.0',
     'pytest-pretty          >=1.2',
     'pytest-rerunfailures   >=10.1',
     'pytest-xdist           >=2.2',
-    'requests               >=2.22.0.dev0',   # Use a prerelease if it's the latest version
+    'requests               >=2.33.0',
     'requests-mock          ~=1.12',
     'responses              >=0.19',
     'tenacity               ~=8.0',
@@ -149,7 +147,7 @@ exclude_lines = [
 ]
 
 [tool.mypy]
-python_version = 3.8
+python_version = '3.10'
 ignore_missing_imports = true
 warn_redundant_casts = true
 warn_unused_ignores = true
@@ -163,7 +161,7 @@ fix = true
 unsafe-fixes = true
 line-length = 100
 output-format = 'grouped'
-target-version = 'py38'
+target-version = 'py310'
 exclude = ['examples/']
 
 [tool.ruff.format]
