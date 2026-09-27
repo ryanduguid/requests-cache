@@ -228,20 +228,18 @@ class CacheMixin(MIXIN_BASE):
         # try a Vary-qualified key before going to the origin server.
         if actions.vary_cache_key:
             vary_key = actions.vary_cache_key
-            vary_cached = self.cache.get_response(vary_key)
+            cached_response = self.cache.get_response(vary_key)
             # Use the Vary-qualified key for any future storage (hit or miss)
             actions.cache_key = vary_key
-            if vary_cached is not None:
-                # Reset decision flags from the failed primary Vary check
-                actions.send_request = False
-                actions.resend_request = False
-                actions.resend_async = False
-                actions.error_504 = False
-                actions.vary_cache_key = None
-                actions._validation_headers = {}
-                # Re-evaluate freshness/expiry with the Vary-matched response
-                actions.update_from_cached_response(vary_cached, self.cache.create_key, **kwargs)
-                cached_response = vary_cached
+            # Reset decisions from the failed primary Vary check.
+            actions.send_request = False
+            actions.resend_request = False
+            actions.resend_async = False
+            actions.error_504 = False
+            actions.vary_cache_key = None
+            actions._validation_headers = {}
+            # Re-evaluate the secondary candidate, including a cache miss.
+            actions.update_from_cached_response(cached_response, self.cache.create_key, **kwargs)
 
         # Handle missing and expired responses based on settings and headers
         if actions.error_504:
@@ -252,15 +250,21 @@ class CacheMixin(MIXIN_BASE):
         elif actions.resend_request:
             response = self._resend(request, actions, cached_response, **kwargs)  # type: ignore
         elif actions.send_request:
-            response = self._send_and_cache(request, actions, cached_response, **kwargs)
+            response = self._send_and_cache(request, actions, **kwargs)
         else:
             response = cached_response  # type: ignore  # Guaranteed to be non-None by this point
 
-        # If the request has been filtered out and was previously cached, delete it
+        # Preserve a mismatching candidate unless a new response replaced it.
+        preserve_vary_candidate = actions.vary_mismatch and (
+            actions.error_504 or actions.skip_write
+        )
         if self.settings.filter_fn is not None and not self.settings.filter_fn(response):
-            logger.debug(f'Deleting filtered response for URL: {response.url}')
-            self.cache.delete(actions.cache_key)
-            return response
+            if not preserve_vary_candidate:
+                logger.debug(f'Deleting filtered response for URL: {response.url}')
+                self.cache.delete(actions.cache_key)
+            # A synthetic Vary miss still needs its response hooks.
+            if not (actions.error_504 and preserve_vary_candidate):
+                return response
 
         # Dispatch any hooks here, because they are removed during serialization
         return dispatch_hook('response', request.hooks, response, **kwargs)

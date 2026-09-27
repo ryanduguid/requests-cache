@@ -6,6 +6,10 @@
 * Redact ignored header names regardless of case and ignored JSON fields above the normalisation size limit.
   Existing cache files are not scrubbed automatically; clear or rewrite entries containing sensitive values.
 * Honour SQLite lock timeouts and close database connections before fallback cache clearing.
+* Treat `Vary` mismatches as cache misses before cache-only, revalidation and stale-response decisions.
+  Keep matching secondary variants available even when the primary entry has expired.
+  Preserve other variants when a response filter rejects a cache-only 504 or a new response.
+* Select the declared Python runtime in the build workflow and exclude orjson on unsupported interpreters.
 
 ## 1.3.3 (2026-07-03)
 * Fix SQLite `vacuum()` not freeing disk space
