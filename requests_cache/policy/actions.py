@@ -9,7 +9,7 @@ from requests import PreparedRequest, Response
 from requests.structures import CaseInsensitiveDict
 
 from .._utils import coalesce, decode, encode, is_json_content_type
-from ..cache_keys import normalize_headers, normalize_request
+from ..cache_keys import _normalize_json_body, normalize_headers, normalize_request
 from ..models import RichMixin
 from . import (
     DO_NOT_CACHE,
@@ -403,11 +403,17 @@ class CacheActions(RichMixin):
                 f'Failed Vary check: Vary header(s) are in ignored_parameters: {ignore_overlap}'
             )
             return False
-        redacted = getattr(cached_request, 'redacted_fields', None)
-        if any(f'header:{h}' in (redacted or []) for h in match_headers):
-            return False
-        if redacted is None or 'unknown' in redacted:
-            return all(cached_headers.get(h) != 'REDACTED' for h in match_headers)
+        for request, headers in (
+            (cached_request, cached_headers),
+            (self._request, current_headers),
+        ):
+            redacted = getattr(request, 'redacted_fields', [])
+            if any(f'header:{h}' in (redacted or []) for h in match_headers):
+                return False
+            if (redacted is None or 'unknown' in redacted) and any(
+                headers.get(h) == 'REDACTED' for h in match_headers
+            ):
+                return False
         return True
 
     def _matches_final_request(self, cached_request: 'CachedRequest') -> bool:
@@ -436,13 +442,16 @@ class CacheActions(RichMixin):
             )
         except (TypeError, ValueError):
             return False
-        if not _has_complete_identity(cached_request, cached):
+        if not all(
+            _has_complete_identity(original, normalised)
+            for original, normalised in ((cached_request, cached), (self._request, current))
+        ):
             return False
 
-        return (current.method, current.url, encode(current.body)) == (
-            cached.method,
-            cached.url,
-            encode(cached.body),
+        return (current.method, current.url) == (cached.method, cached.url) and (
+            encode(current.body) == encode(cached.body)
+            or _identity_body(current, self._settings.content_root_key)
+            == _identity_body(cached, self._settings.content_root_key)
         )
 
     def _cookies_match(self, cached_request: 'CachedRequest') -> bool:
@@ -459,7 +468,10 @@ class CacheActions(RichMixin):
         )
         if cached_field[0] or current_field[0]:
             return cached_field == current_field
-        if 'cookies' in (getattr(cached_request, 'redacted_fields', None) or []):
+        if any(
+            'cookies' in (getattr(request, 'redacted_fields', None) or [])
+            for request in (cached_request, self._request)
+        ):
             return False
         if 'cookie' in {h.lower() for h in (self._settings.ignored_parameters or [])}:
             return True
@@ -503,8 +515,24 @@ def _log_vary_diff(
     logger.debug(f'Failed Vary check. Non-matching headers: {", ".join(nonmatching)}')
 
 
-def _has_complete_identity(original: 'CachedRequest', normalised: 'AnyPreparedRequest') -> bool:
+def _identity_body(request: 'AnyPreparedRequest', content_root_key: Optional[str]) -> bytes:
+    """Compare JSON consistently when one large body was normalised before storage."""
+    body = encode(request.body)
+    content_type = decode(request.headers.get('Content-Type', ''), encoding='latin-1')
+    if is_json_content_type(content_type.split(';', 1)[0].lower()):
+        try:
+            body = encode(_normalize_json_body(body, None, content_root_key, force=True)[0])
+        except RecursionError:
+            pass  # Keep byte comparison when a large body exceeds the JSON parser's depth limit.
+    return body
+
+
+def _has_complete_identity(
+    original: 'AnyPreparedRequest', normalised: 'AnyPreparedRequest'
+) -> bool:
     """Use recorded data loss where available, and conservative checks for legacy entries."""
+    if isinstance(original, PreparedRequest) and not hasattr(original, 'redacted_fields'):
+        return True
     redacted = getattr(original, 'redacted_fields', None)
     if redacted is not None:
         if {'url', 'body'} & set(redacted) or (original.body and 'header:content-type' in redacted):

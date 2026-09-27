@@ -256,14 +256,23 @@ def _normalize_json_body(
     original_body: Union[str, bytes],
     ignored_parameters: ParamList,
     content_root_key: Optional[str] = None,
+    force: bool = False,
 ) -> Tuple[Union[str, bytes], bool]:
     if len(original_body) <= 2 or (
-        len(original_body) > MAX_NORM_BODY_SIZE and not ignored_parameters
+        len(original_body) > MAX_NORM_BODY_SIZE and not ignored_parameters and not force
     ):
         return original_body, False
 
+    duplicate_members = False
+
+    def collect_pairs(pairs):
+        nonlocal duplicate_members
+        values = dict(pairs)
+        duplicate_members |= len(values) != len(pairs)
+        return values
+
     try:
-        body = _json.loads(decode(original_body))
+        body = _json.loads(decode(original_body), object_pairs_hook=collect_pairs)
     # If it's invalid JSON, then don't mess with it
     except (json.JSONDecodeError, UnicodeDecodeError):
         logger.debug('Invalid JSON body')
@@ -272,13 +281,13 @@ def _normalize_json_body(
     if content_root_key and isinstance(body, dict) and content_root_key in body:
         selected = body[content_root_key]
         filtered = filter_sort_json(selected, ignored_parameters)
-        redacted = filtered != selected
+        redacted = filtered is not selected and filtered != selected
         body[content_root_key] = filtered
     else:
         filtered = filter_sort_json(body, ignored_parameters)
-        redacted = filtered != body
+        redacted = filtered is not body and filtered != body
         body = filtered
-    return _json.dumps(body), redacted
+    return _json.dumps(body), redacted or duplicate_members
 
 
 def normalize_params(value: Union[str, bytes], ignored_parameters: ParamList = None) -> str:

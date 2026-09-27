@@ -7,7 +7,7 @@ import pytest
 from requests import Request
 
 from requests_cache import CachedRequest, CachedResponse, cache_keys, init_serializer
-from requests_cache.cache_keys import normalize_request, redact_response
+from requests_cache.cache_keys import create_key, normalize_request, redact_response
 from requests_cache.policy import CacheActions, CacheSettings
 from tests.conftest import MOCKED_URL
 
@@ -206,6 +206,152 @@ def test_filtered_normalisation_survives_native_copy():
     copied = CachedRequest.from_request(filtered.copy().copy())
     assert copied.redacted_fields == ['url']
     assert copied.url.endswith('secret=REDACTED')
+
+
+@pytest.mark.parametrize('serializer_name', ['json', 'ujson', 'orjson', 'pickle', 'yaml', 'bson'])
+@pytest.mark.parametrize(
+    'body, root',
+    [
+        (b'{"secret":"fixture","secret":"REDACTED"}', None),
+        (b'{"data":{"secret":"fixture"},"data":{"public":1}}', 'data'),
+    ],
+)
+def test_duplicate_members_cannot_preserve_ignored_values(serializer_name, body, root):
+    if serializer_name not in ('json', 'pickle'):
+        pytest.importorskip(serializer_name)
+    request = Request(
+        'POST', 'https://example.com/', data=body, headers={'Content-Type': 'application/json'}
+    ).prepare()
+    response = CachedResponse(url=request.url, request=CachedRequest.from_request(request))
+    redact_response(response, ['secret'], content_root_key=root)
+    serializer = init_serializer(serializer_name, decode_content=False)
+    stored = serializer.loads(serializer.dumps(response))
+
+    assert b'fixture' not in stored.request.body
+    assert 'body' in stored.request.redacted_fields
+
+
+@pytest.mark.parametrize('field', ['url', 'body', 'cookie', 'header', 'jar', 'stream'])
+@pytest.mark.parametrize('lost', [False, True])
+def test_current_request_must_retain_comparison_values(field, lost):
+    headers = {'Cookie': 'fixture'} if field != 'jar' else {}
+    kwargs = {}
+    url = 'https://example.com/'
+    ignored = []
+    if field == 'url':
+        url += '?secret=fixture'
+        ignored = ['secret']
+    elif field == 'body':
+        kwargs['json'] = {'secret': 'fixture'}
+        ignored = ['secret']
+    elif field == 'stream':
+        kwargs['data'] = BytesIO(b'fixture')
+    elif field == 'header':
+        headers['X-Variant'] = 'fixture'
+        ignored = ['X-Variant']
+    elif field in ('cookie', 'jar'):
+        ignored = ['Cookie']
+    if field == 'jar':
+        kwargs['cookies'] = {'theme': 'fixture'}
+    original = Request('POST', url, headers=headers, **kwargs).prepare()
+    if field == 'jar':
+        del original.headers['Cookie']
+    current = normalize_request(original, ignored).copy().copy()
+    intact = Request(
+        current.method, current.url, data=current.body, headers=dict(current.headers)
+    ).prepare()
+    cached = CachedRequest.from_request(intact)
+    if not lost:
+        current = intact
+    assert create_key(current, ignored_parameters=[]) == create_key(cached, ignored_parameters=[])
+    response = CachedResponse(
+        url=current.url,
+        request=cached,
+        status_code=200,
+        headers={'Vary': 'X-Variant' if field == 'header' else 'Cookie'},
+        history=[CachedResponse(url=current.url, request=cached.copy(), status_code=307)],
+    )
+    actions = CacheActions.from_request(
+        'fixture-key', current, CacheSettings(only_if_cached=True, ignored_parameters=[])
+    )
+
+    actions.update_from_cached_response(response, create_key)
+
+    assert actions.error_504 is lost
+    assert not actions.send_request and not actions.resend_request
+
+
+@pytest.mark.parametrize('serializer_name', ['json', 'ujson', 'orjson', 'pickle', 'yaml', 'bson'])
+@pytest.mark.parametrize('prepare_first', [False, True])
+def test_large_identity_after_normalising_before_storage(
+    monkeypatch, serializer_name, prepare_first
+):
+    if serializer_name not in ('json', 'pickle'):
+        pytest.importorskip(serializer_name)
+    monkeypatch.setattr(cache_keys, 'MAX_NORM_BODY_SIZE', 10)
+    original = Request(
+        'POST', 'https://example.com/', json={'z': ['kept'], 'a': 1}, headers={'Cookie': 'fixture'}
+    )
+    current = original.prepare()
+    normalised = normalize_request(current if prepare_first else original, ['unused'])
+    cached = CachedRequest.from_request(normalised.copy().copy())
+    response = CachedResponse(
+        url=current.url,
+        request=cached,
+        status_code=200,
+        headers={'Vary': 'Cookie'},
+        history=[CachedResponse(url=current.url, request=cached.copy(), status_code=307)],
+    )
+    redact_response(response, ['unused'])
+    serializer = init_serializer(serializer_name, decode_content=False)
+    stored = serializer.loads(serializer.dumps(response))
+    assert create_key(current, ignored_parameters=['unused']) == create_key(
+        stored.request, ignored_parameters=['unused']
+    )
+    actions = CacheActions.from_request(
+        'fixture-key', current, CacheSettings(only_if_cached=True, ignored_parameters=['unused'])
+    )
+
+    actions.update_from_cached_response(stored, create_key)
+
+    assert not actions.error_504
+    assert not actions.send_request and not actions.resend_request
+
+
+@pytest.mark.parametrize('ignored', [[], ['unused']])
+def test_unchanged_nan_does_not_record_data_loss(ignored):
+    body, removed = cache_keys._normalize_json_body(b'NaN', ignored)
+    assert body == 'NaN'
+    assert not removed
+
+
+def test_large_json_depth_limit_declines_an_ambiguous_identity(monkeypatch):
+    def exceed_depth(_value, **_kwargs):
+        raise RecursionError('JSON nesting exceeds the parser limit')
+
+    monkeypatch.setattr(cache_keys, 'MAX_NORM_BODY_SIZE', 10)
+    monkeypatch.setattr(cache_keys._json, 'loads', exceed_depth)
+    headers = {'Content-Type': 'application/json', 'Cookie': 'fixture'}
+    body = '["fixture", 0]'
+    current = Request('POST', 'https://example.com/', data=body, headers=headers).prepare()
+    cached = CachedRequest.from_request(
+        Request('POST', current.url, data=body.replace('0', ' 0'), headers=headers).prepare()
+    )
+    response = CachedResponse(
+        url=current.url,
+        request=cached,
+        status_code=200,
+        headers={'Vary': 'Cookie'},
+        history=[CachedResponse(url=current.url, request=cached.copy(), status_code=307)],
+    )
+    actions = CacheActions.from_request(
+        'fixture-key', current, CacheSettings(only_if_cached=True, ignored_parameters=[])
+    )
+
+    actions.update_from_cached_response(response, lambda *_args, **_kwargs: 'fixture-key')
+
+    assert actions.error_504
+    assert not actions.send_request and not actions.resend_request
 
 
 @pytest.mark.parametrize('normalise_first', [False, True])

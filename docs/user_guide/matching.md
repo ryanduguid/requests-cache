@@ -114,6 +114,10 @@ identities or streamed bodies cannot establish that match. Older entries without
 reject ambiguous arrays and redaction markers, since an earlier `content_root_key` setting may have
 removed values. New normalisation and redaction preserve any known losses and legacy uncertainty.
 If a nominated value or the `Vary` field itself was redacted, the cached response cannot be reused.
+Known losses on the current request also prevent comparison. Collapsing duplicate JSON members
+during redaction marks the stored body as unavailable for redirect identity checks. When otherwise
+intact JSON bodies differ as bytes, those checks normalise both bodies, including bodies above
+the usual cache-key size limit.
 
 
 (custom-matching)=

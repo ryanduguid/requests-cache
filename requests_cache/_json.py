@@ -46,8 +46,10 @@ def _decode_int(value: str):
         return _RawNumber(value)
 
 
-def loads(value):
-    return json.loads(value, parse_float=_decode_float, parse_int=_decode_int)
+def loads(value, object_pairs_hook=None):
+    return json.loads(
+        value, parse_float=_decode_float, parse_int=_decode_int, object_pairs_hook=object_pairs_hook
+    )
 
 
 def dumps(value):
