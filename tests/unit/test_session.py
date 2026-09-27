@@ -517,6 +517,30 @@ def test_ignored_cookie_jar_is_not_saved(mock_session):
     assert original_response.request._cookies['theme'] == 'light'
 
 
+@pytest.mark.parametrize('allow_redirects', [True, False])
+def test_ignored_cookie_jar_in_redirect_snapshots(mock_session, allow_redirects):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Cookie']
+    mock_session.settings.allowable_codes = (200, 302)
+    response = mock_session.get(
+        MOCKED_URL_REDIRECT, cookies={'theme': 'light'}, allow_redirects=allow_redirects
+    )
+    assert response.request._cookies['theme'] == 'light'
+    stored_responses = list(mock_session.cache.responses.values())
+    assert stored_responses
+    if allow_redirects:
+        assert any(stored.history for stored in stored_responses)
+    else:
+        assert any(stored._next for stored in stored_responses)
+
+    for stored in stored_responses:
+        for snapshot in [stored, *stored.history]:
+            for request in (snapshot.request, snapshot._next):
+                if request is not None:
+                    assert request.headers['Cookie'] == 'REDACTED'
+                    assert not request.cookies
+
+
 def test_match_headers__vary_authorization(mock_session):
     """When Vary headers overlaps with ignored_parameters and the header is present on the
     request, it's always a cache miss (prevents cross-user cache leakage).

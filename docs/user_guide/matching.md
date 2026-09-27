@@ -50,7 +50,8 @@ As well as headers, if `match_headers=True` is used:
 ```
 ```{note}
 Since `ignored_parameters` is most often used for sensitive info like credentials, these values will also be removed from the cached request parameters, body, and headers.
-Ignoring `Cookie` also removes the stored request's cookie jar without changing the live request.
+Ignoring `Cookie` also removes stored request cookie jars without changing the live request.
+Redaction includes stored redirect requests and prepared next requests.
 Existing cache files are not scrubbed automatically.
 ```
 

@@ -60,6 +60,48 @@ def test_redact_response__ignored_cookie_jar(has_header):
     assert original_request._cookies['theme'] == 'light'
 
 
+@pytest.mark.parametrize('location', ['request', 'history', 'next'])
+def test_redact_response__detached_request_snapshots(location):
+    prepared = Request(
+        'GET',
+        'https://example.com/page?auth-token=fabricated',
+        cookies={'theme': 'light'},
+        headers={'X-Private': 'fabricated', 'Content-Type': 'application/x-www-form-urlencoded'},
+        data='auth-token=fabricated',
+    ).prepare()
+    request = CachedRequest.from_request(prepared)
+    original = CachedResponse(url=prepared.url, request=request, status_code=200)
+    if location == 'history':
+        original.status_code = 302
+        original.headers['Location'] = 'https://example.com/final'
+        original = CachedResponse(
+            url='https://example.com/final', history=[original], status_code=200
+        )
+    elif location == 'next':
+        original = CachedResponse(url='https://example.com/start', next=request, status_code=302)
+
+    redacted = CachedResponse.from_response(original)
+    redact_response(redacted, ['Cookie', 'auth-token', 'X-Private'])
+    if location == 'history':
+        stored_request = redacted.history[0].request
+        assert 'fabricated' not in redacted.history[0].url
+    elif location == 'next':
+        stored_request = redacted._next
+    else:
+        stored_request = redacted.request
+
+    assert stored_request.headers['Cookie'] == 'REDACTED'
+    assert stored_request.headers['X-Private'] == 'REDACTED'
+    assert not stored_request.cookies
+    assert 'fabricated' not in stored_request.url
+    assert b'fabricated' not in stored_request.body
+    assert request.headers['Cookie'] == 'theme=light'
+    assert request.headers['X-Private'] == 'fabricated'
+    assert request.cookies['theme'] == 'light'
+    assert 'fabricated' in request.url
+    assert b'fabricated' in request.body
+
+
 @pytest.mark.parametrize(
     'url, params',
     [

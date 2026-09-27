@@ -2,7 +2,7 @@
 
 ## Unreleased
 * Match `Vary: Cookie` against the sent header and reject wildcard members and redacted comparisons.
-  Redact ignored request cookie jars without changing live requests.
+  Redact ignored request cookie jars and redirect snapshots without changing live requests.
 * Require Python 3.10+ and patched Requests, urllib3, UltraJSON and orjson releases.
   Remove vulnerable legacy-Python lock entries and update the supported test matrices.
 * Separate cache-key fields and preserve JSON array order and header values when matching.

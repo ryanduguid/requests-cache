@@ -242,12 +242,16 @@ def normalize_params(value: Union[str, bytes], ignored_parameters: ParamList = N
 def redact_response(response: CachedResponse, ignored_parameters: ParamList) -> CachedResponse:
     """Redact any ignored parameters (potentially containing sensitive info) from a cached request"""
     if ignored_parameters:
-        response.url = filter_url(response.url, ignored_parameters)
-        response.request.url = filter_url(response.request.url, ignored_parameters)
-        response.headers = normalize_headers(response.headers, ignored_parameters)
-        response.request.headers = normalize_headers(response.request.headers, ignored_parameters)
-        response.request.body = normalize_body(response.request, ignored_parameters)
-        _redact_cookie_jar(response.request, ignored_parameters)
+        for cached_response in [response, *response.history]:
+            cached_response.url = filter_url(cached_response.url, ignored_parameters)
+            cached_response.headers = normalize_headers(cached_response.headers, ignored_parameters)
+            for request in (cached_response.request, cached_response._next):
+                if request is None:
+                    continue
+                request.url = filter_url(request.url, ignored_parameters)
+                request.headers = normalize_headers(request.headers, ignored_parameters)
+                request.body = normalize_body(request, ignored_parameters)
+                _redact_cookie_jar(request, ignored_parameters)
     return response
 
 

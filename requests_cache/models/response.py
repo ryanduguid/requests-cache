@@ -96,6 +96,8 @@ class CachedResponse(RichMixin, BaseResponse):
         """Create a CachedResponse based on an original Response or another CachedResponse object"""
         if isinstance(response, CachedResponse):
             obj = attr.evolve(response, **kwargs)
+            obj.request = obj.request.copy()
+            obj._next = obj._next.copy() if obj._next else None
             obj._convert_redirects()
             return obj
 
