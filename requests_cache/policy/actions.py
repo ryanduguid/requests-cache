@@ -440,7 +440,7 @@ class CacheActions(RichMixin):
                 ignored_parameters=None,
                 content_root_key=self._settings.content_root_key,
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             return False
         if not all(
             _has_complete_identity(original, normalised)
@@ -560,6 +560,8 @@ def _has_complete_identity(
 def _has_ambiguous_json_array(body: bytes) -> bool:
     try:
         data = json.loads(body, parse_int=str, parse_float=str)
+    except RecursionError:
+        return True
     except ValueError:
         return False
     # A previous content_root_key can name any immediate member, even if settings later change.

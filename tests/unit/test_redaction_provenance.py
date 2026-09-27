@@ -1,5 +1,6 @@
 """Cache-only matching distinguishes literal values from removed request data."""
 
+import json
 import pickle
 from io import BytesIO
 
@@ -337,6 +338,38 @@ def test_large_json_depth_limit_declines_an_ambiguous_identity(monkeypatch):
     cached = CachedRequest.from_request(
         Request('POST', current.url, data=body.replace('0', ' 0'), headers=headers).prepare()
     )
+    response = CachedResponse(
+        url=current.url,
+        request=cached,
+        status_code=200,
+        headers={'Vary': 'Cookie'},
+        history=[CachedResponse(url=current.url, request=cached.copy(), status_code=307)],
+    )
+    actions = CacheActions.from_request(
+        'fixture-key', current, CacheSettings(only_if_cached=True, ignored_parameters=[])
+    )
+
+    actions.update_from_cached_response(response, lambda *_args, **_kwargs: 'fixture-key')
+
+    assert actions.error_504
+    assert not actions.send_request and not actions.resend_request
+
+
+@pytest.mark.parametrize('cutoff', [10, 1024])
+def test_legacy_json_parser_limit_is_a_cache_miss(monkeypatch, cutoff):
+    def exceed_depth(_value, **_kwargs):
+        raise RecursionError('JSON nesting exceeds the parser limit')
+
+    monkeypatch.setattr(cache_keys, 'MAX_NORM_BODY_SIZE', cutoff)
+    monkeypatch.setattr(json, 'loads', exceed_depth)
+    current = Request(
+        'POST',
+        'https://example.com/',
+        data=b'["fixture", 0]',
+        headers={'Content-Type': 'application/json', 'Cookie': 'fixture'},
+    ).prepare()
+    cached = CachedRequest.from_request(current)
+    cached.redacted_fields = None
     response = CachedResponse(
         url=current.url,
         request=cached,
