@@ -36,6 +36,11 @@ This backend accepts any keyword arguments for {py:func}`sqlite3.connect`:
 If specified, `busy_timeout` overrides this wait in milliseconds. A lock that remains held
 raises `sqlite3.OperationalError` after that wait.
 
+`bulk_commit()` groups writes into one transaction. An error escaping the block rolls it back
+and propagates to the caller. Nested bulk blocks are unsupported. Calling `close()`, `clear()`
+or `vacuum()` on the same storage object during that transaction raises
+`sqlite3.ProgrammingError`, so those operations cannot silently commit a partial batch.
+
 ## Cache Files
 - By default, a file named `http_cache.sqlite` will be created in the current working directory
 - You can specify a different cache filename using the first positional argument to {py:class}`.SQLiteCache`
@@ -80,17 +85,29 @@ for details.
 ```
 
 ## Concurrency
-SQLite supports concurrent access, so it is safe to use from a multi-threaded and/or multi-process
-application. It supports unlimited concurrent reads. Writes, however, are queued and run in serial,
-so if you need to make large volumes of concurrent requests, you may want to consider a different
-backend that's specifically made for that kind of workload, like {py:class}`.RedisCache`.
+SQLite supports access from multiple threads and processes. Each cache instance serialises its
+database operations with a reentrant lock, including reads and connection closing. Separate
+connections can read concurrently; SQLite coordinates competing writes. For large volumes of
+concurrent requests, consider a backend designed for that workload, such as {py:class}`.RedisCache`.
 
 One option to consider is `Write Ahead Logging <https://sqlite.org/wal.html>`_. This comes with a
-number of tradeoffs, but most notably it allows read operations to not block writes. This can be
+number of tradeoffs, but most notably it allows reads and writes on separate connections to overlap.
+Operations sharing one cache instance still use its lock. WAL can be
 enabled with the `wal` option:
 ```python
 >>> backend = SQLiteCache(wal=True)
 ```
+
+Cache iterators select their keys when iteration first advances, then release the database cursor.
+Sorted iteration applies its order, expiry filter and limit at that point, and loads each response
+as needed. Updates can change a selected response's content, size or expiry; deleted or unreadable
+entries are skipped without selecting replacements. Results are not an atomic snapshot of response
+contents. Selecting keys uses memory proportional to the number selected and adds a lookup per
+response, but does not load every response body at once. Use `limit` to bound a sorted selection.
+
+Closing a file-backed cache between results allows later lookups to reopen it. Closing the last
+connection to an in-memory database destroys that database, so response iteration cannot resume
+from its former contents.
 
 ## Hosting Services and Filesystem Compatibility
 There are some caveats to using SQLite with some hosting services, based on what kind of storage is

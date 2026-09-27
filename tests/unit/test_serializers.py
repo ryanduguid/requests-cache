@@ -6,11 +6,16 @@ import sys
 from importlib import reload
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
+from base64 import b64encode
 
 import pytest
 from cattrs import BaseConverter, GenConverter
+from requests import Request
+from urllib3.connection import HTTPConnection
+from urllib3.util import SKIP_HEADER
 
 from requests_cache import (
+    CachedRequest,
     CachedResponse,
     CachedSession,
     CattrStage,
@@ -22,6 +27,162 @@ from requests_cache import (
     init_serializer,
 )
 from tests.conftest import skip_missing_deps
+from requests_cache.cache_keys import normalize_request, normalize_headers
+
+
+@pytest.mark.parametrize('serializer_name', ['json', 'ujson', 'orjson', 'pickle', 'yaml', 'bson'])
+@pytest.mark.parametrize(
+    'value',
+    [
+        b'',
+        b'ordinary',
+        b'calf\xe9',
+        b'\xc3\xa9',
+        b'\xff\x80',
+        b'\x85fixture',
+        b'Mixed,  values\tinside ',
+        SKIP_HEADER.encode(),
+    ],
+)
+@pytest.mark.parametrize('location', ['request', 'next', 'history'])
+def test_raw_byte_headers(serializer_name, value, location):
+    """Serialisers preserve valid header octets when request normalisation is disabled."""
+    if serializer_name not in ('json', 'pickle'):
+        pytest.importorskip(serializer_name)
+    prepared = Request(
+        'GET',
+        'https://example.com/final',
+        data=b'fixture body',
+        headers={
+            'X-Fixture': value,
+            'Content-Type': b'application/octet-stream',
+            'X-Text': 'ordinary',
+        },
+    ).prepare()
+    request = CachedRequest.from_request(prepared)
+    response = CachedResponse(status_code=200, content=b'\x00\xff', request=request)
+    if location == 'next':
+        response = CachedResponse(status_code=302, next=request)
+    elif location == 'history':
+        response = CachedResponse(status_code=200, history=[response])
+    serializer = init_serializer(serializer_name, decode_content=False)
+
+    restored = serializer.loads(serializer.dumps(response))
+
+    if location == 'history':
+        restored = restored.history[0]
+    stored_request = restored._next if location == 'next' else restored.request
+    outgoing = stored_request.prepare()
+    header = outgoing.headers['X-Fixture']
+    assert (header.encode('latin-1') if isinstance(header, str) else header) == value
+    assert outgoing.body == prepared.body
+    assert outgoing.headers['X-Text'] == 'ordinary'
+    assert prepared.headers['X-Fixture'] == value
+    if serializer_name in ('pickle', 'yaml', 'bson'):
+        assert stored_request.headers['X-Fixture'] == value
+
+
+@pytest.mark.parametrize('serializer_name', ['json', 'ujson', 'orjson'])
+@pytest.mark.parametrize('name', ['X-Fixture', 'User-Agent'])
+@pytest.mark.parametrize('value', [SKIP_HEADER.encode(), SKIP_HEADER])
+@pytest.mark.parametrize('normalise', [False, True])
+def test_transport_control_header(serializer_name, name, value, normalise):
+    """Literal bytes and the urllib3 string control must retain different transport behaviour."""
+    if serializer_name != 'json':
+        pytest.importorskip(serializer_name)
+    prepared = Request('GET', 'https://example.com/', headers={name: value}).prepare()
+    request = normalize_request(prepared) if normalise else prepared
+    response = CachedResponse(status_code=200, next=CachedRequest.from_request(request))
+    serializer = init_serializer(serializer_name, decode_content=False).copy()
+
+    restored = serializer.loads(serializer.dumps(response)).next
+
+    assert restored.headers[name] == value
+    with patch('http.client.HTTPConnection.putheader') as emit:
+        connection = HTTPConnection('example.com')
+        if isinstance(value, bytes):
+            connection.putheader(name, restored.headers[name])
+            emit.assert_called_once_with(name, value)
+        elif name == 'User-Agent':
+            connection.putheader(name, restored.headers[name])
+            emit.assert_not_called()
+        else:
+            with pytest.raises(ValueError):
+                connection.putheader(name, restored.headers[name])
+            emit.assert_not_called()
+
+
+@pytest.mark.parametrize('serializer_name', ['json', 'ujson', 'orjson'])
+@pytest.mark.parametrize('decode_content', [False, True])
+@pytest.mark.parametrize(
+    'content_type, body',
+    [
+        ('application/json', b'{"fixture": 1}'),
+        ('text/plain', b'calf\xc3\xa9'),
+        ('application/octet-stream', b'\x00\xff'),
+    ],
+)
+def test_json_header_conversion_preserves_body(serializer_name, decode_content, content_type, body):
+    if serializer_name != 'json':
+        pytest.importorskip(serializer_name)
+    response = CachedResponse(
+        status_code=200,
+        content=body,
+        encoding='utf-8',
+        headers={
+            'Content-Type': content_type,
+            'Content-Length': str(len(body)),
+            'X-Fixture': b'calf\xe9',
+        },
+    )
+    serializer = init_serializer(serializer_name, decode_content=decode_content).copy()
+
+    stored = serializer.stages[0].dumps(response)
+    restored = serializer.loads(serializer.dumps(response))
+
+    if decode_content and content_type == 'application/json':
+        assert restored.json() == {'fixture': 1}
+    else:
+        assert restored.content == body
+    assert restored.headers['Content-Length'] == str(len(restored.content))
+    assert restored.headers['X-Fixture'] == 'calf\xe9'
+    assert response.headers['X-Fixture'] == b'calf\xe9'
+    if decode_content and content_type != 'application/octet-stream':
+        assert '_decoded_content' in stored
+        assert '_content' not in stored
+    else:
+        assert stored['_content'] == b64encode(body).decode()
+        assert '_decoded_content' not in stored
+
+
+@pytest.mark.parametrize('serializer_name', ['json', 'ujson', 'orjson', 'pickle', 'yaml', 'bson'])
+@pytest.mark.parametrize('normalise', [False, True])
+@pytest.mark.parametrize(
+    'content_type, body',
+    [
+        (b'application/json', b'{"fixture":1}'),
+        (b'text/plain', b'calf\xc3\xa9'),
+        (b'application/octet-stream', b'\x00\xff'),
+        (SKIP_HEADER.encode(), b'\x00\xff'),
+    ],
+)
+def test_decode_content__byte_content_type(serializer_name, normalise, content_type, body):
+    if serializer_name not in ('json', 'pickle'):
+        pytest.importorskip(serializer_name)
+    headers = {'Content-Type': content_type}
+    if normalise:
+        headers = normalize_headers(headers, ignored_parameters=['unused'])
+    response = CachedResponse(content=body, encoding='utf-8', headers=headers)
+    serializer = init_serializer(serializer_name, decode_content=True)
+
+    restored = serializer.loads(serializer.dumps(response))
+
+    assert restored.content == body
+    assert response.headers == headers
+    if serializer_name in ('pickle', 'yaml', 'bson') or content_type == SKIP_HEADER.encode():
+        assert restored.headers == headers
+    else:
+        assert restored.headers['Content-Type'] == content_type.decode('latin-1')
 
 
 @skip_missing_deps('orjson')

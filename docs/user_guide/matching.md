@@ -1,7 +1,10 @@
 (matching)=
 # {fas}`equals` Request Matching
-Requests are matched according to the request method, URL, parameters and body. All of these values
-are normalized to account for any variations that do not modify response content.
+Requests are matched according to the request method, URL, parameters and body. Normalisation
+ignores parameter order and standardises URL spelling, such as host case and default ports.
+Query and form matching distinguish literal plus signs from spaces, bare names from empty values,
+and different percent-encoded bytes or Unicode code points. Duplicate parameter order is ignored;
+use custom matching if your server distinguishes that order.
 
 There are some additional options to configure how you want requests to be matched.
 
@@ -39,6 +42,14 @@ This also applies to parameters in a JSON-formatted request body:
 >>> assert r.from_cache is True
 ```
 
+JSON matching preserves scalar types and precise numbers. Numbers that cannot pass through a
+Python float without changing their decimal value retain their original spelling, so equivalent
+spellings of those numbers may produce separate entries. Array order is preserved. Duplicate
+object members retain the last value, as in Python's JSON decoder.
+`content_root_key` applies filtering to the selected root in both keys and stored requests.
+An iterator passed as `ignored_parameters` is retained for subsequent requests.
+Malformed JSON passes through unchanged; its fields are not redacted.
+
 **Request Headers:**
 
 As well as headers, if `match_headers=True` is used:
@@ -50,6 +61,9 @@ As well as headers, if `match_headers=True` is used:
 ```
 ```{note}
 Since `ignored_parameters` is most often used for sensitive info like credentials, these values will also be removed from the cached request parameters, body, and headers.
+Ignoring `Cookie` also removes stored request cookie jars without changing the live request.
+Redaction includes stored redirect requests and prepared next requests.
+Existing cache files are not scrubbed automatically.
 ```
 
 ```{tip}
@@ -66,9 +80,9 @@ In some cases, request header values can affect response content. For example, s
 i18n and [content negotiation](https://developer.mozilla.org/en-US/docs/Web/HTTP/Content_negotiation) may use the `Accept-Language` header to determine which language to serve content in.
 
 The server will ideally also send a `Vary` header in the response, which informs caches about
-which request headers to match. By default, requests-cache respects this: each unique combination
-of Vary-specified header values is cached separately, so alternating between variants (e.g.,
-different `Accept` values for content negotiation) works correctly without extra configuration.
+which request headers to match. Requests-cache checks those headers before reusing a response.
+Different values of headers such as `Accept` can be cached as separate variants.
+A `Vary` field containing `*` always prevents reuse, including when it lists other headers.
 Not all servers send `Vary`, however.
 ```
 
@@ -84,6 +98,26 @@ isn't available:
 If you want to match _all_ request headers, you can use `match_headers=True`.
 Header names are case-insensitive. Header values retain their case, whitespace and order,
 because their meaning depends on the server and header field.
+Byte-valued headers use the same Latin-1 mapping as Requests, including with JSON serialisers.
+The literal bytes `b'@@@SKIP_HEADER@@@'` remain distinct from urllib3's string control value.
+Clear older entries containing non-ASCII byte headers or that literal byte value, since their
+original bytes and types cannot always be recovered. New JSON entries use a tagged value for
+that byte literal; clear those entries before returning to an older version.
+`Vary: Cookie` compares the exact sent header, including an explicit header that overrides a cookie jar.
+Use `match_headers=['Cookie']` to retain different Cookie variants separately.
+For responses with redirect history and `Vary: Cookie`, only a request matching the final method,
+normalised URL and body can reuse the cached response directly. Requests through other redirect
+aliases must follow the redirects again; cache-only requests return 504.
+The final identity must still be available. Stored requests record which fields lost values during
+redaction, so unchanged JSON arrays and literal `REDACTED` text can match. Requests with redacted
+identities or streamed bodies cannot establish that match. Older entries without this record still
+reject ambiguous arrays and redaction markers, since an earlier `content_root_key` setting may have
+removed values. New normalisation and redaction preserve any known losses and legacy uncertainty.
+If a nominated value or the `Vary` field itself was redacted, the cached response cannot be reused.
+Known losses on the current request also prevent comparison. Collapsing duplicate JSON members
+during redaction marks the stored body as unavailable for redirect identity checks. When otherwise
+intact JSON bodies differ as bytes, those checks normalise both bodies, including bodies above
+the usual cache-key size limit.
 
 
 (custom-matching)=
@@ -104,6 +138,14 @@ the second and third requests below share a cached response:
 ```
 
 ### Recreating Cache Keys
+```{warning}
+This update uses a new default cache-key namespace. Start with a fresh cache or clear the old cache,
+including redirect aliases. Older stored requests may have lost parameter values, empty fields or
+JSON precision, and decoded responses may also be damaged. `recreate_keys()` cannot recover that
+information. Custom key functions must invalidate old entries themselves. The steps below apply
+only when the stored request data is still complete.
+```
+
 There are some situations where request matching behavior may change, which causes previously cached
 responses to become obsolete:
 * You start using a custom cache key, or change other settings that affect request matching

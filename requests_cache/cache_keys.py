@@ -23,12 +23,15 @@ from typing import (
     Tuple,
     Union,
 )
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote_plus, unquote_to_bytes, urlencode, urlparse, urlunparse
 
-from requests import Request, Session
+from requests import PreparedRequest, Request, Session
+from requests.cookies import RequestsCookieJar
 from requests.structures import CaseInsensitiveDict
 from url_normalize import url_normalize
+from urllib3.util import SKIP_HEADER  # type: ignore[attr-defined]
 
+from . import _json
 from ._utils import decode, encode, patch_form_boundary, is_json_content_type
 
 __all__ = [
@@ -73,6 +76,7 @@ def create_key(
     # Normalize and gather all relevant request info to match against
     request = normalize_request(request, ignored_parameters, content_root_key)
     key_parts = [
+        b'requests-cache-key-v2',  # Old normalisation could erase values in stored request metadata.
         request.method or '',
         request.url,
         request.body or '',
@@ -106,8 +110,9 @@ def get_matched_headers(
         return []
     if match_headers is True:
         match_headers = headers
+    # Keep literal byte control values distinct from strings containing their representation.
     return [
-        f'{k.lower()}={headers[k]}'
+        f'{k.lower()}={headers[k]!r}'
         for k in sorted(match_headers, key=lambda x: x.lower())
         if k in headers
     ]
@@ -129,6 +134,9 @@ def normalize_request(
         ignored_parameters: Request parameters, headers, and/or JSON body params to exclude
         content_root_key: root element in the request body to apply ignored_parameters to
     """
+    from .models.request import _PreparedRequest
+
+    ignored_parameters = tuple(ignored_parameters or ())
     if isinstance(request, Request):
         # For a multipart POST request that hasn't been prepared, we need to patch the form boundary
         # so the request body will have a consistent hash
@@ -137,10 +145,27 @@ def normalize_request(
     else:
         norm_request = request.copy()
 
+    if type(norm_request) is PreparedRequest:
+        norm_request.__class__ = _PreparedRequest
+    norm_request.redacted_fields = getattr(request, 'redacted_fields', [])  # type: ignore[union-attr]
+
     norm_request.method = (norm_request.method or '').upper()
-    norm_request.url = normalize_url(norm_request.url or '', ignored_parameters)
-    norm_request.headers = normalize_headers(norm_request.headers, ignored_parameters)
-    norm_request.body = normalize_body(norm_request, ignored_parameters, content_root_key)
+    original_url = norm_request.url or ''
+    norm_request.url = normalize_url(original_url, ignored_parameters)
+    original_body: object = norm_request.body
+    if original_body is not None and not isinstance(original_body, (str, bytes)):
+        _record_redaction(norm_request, 'body')
+    norm_request.body, body_redacted = _normalize_body(
+        norm_request, ignored_parameters, content_root_key
+    )
+    if body_redacted:
+        _record_redaction(norm_request, 'body')
+    if ignored_parameters and urlparse(norm_request.url).query != normalize_params(
+        urlparse(original_url).query
+    ):
+        _record_redaction(norm_request, 'url')
+    _redact_headers(norm_request, ignored_parameters)
+    _redact_cookie_jar(norm_request, ignored_parameters)
     return norm_request
 
 
@@ -148,10 +173,15 @@ def normalize_headers(
     headers: MutableMapping[str, str],
     ignored_parameters: ParamList = None,
 ) -> CaseInsensitiveDict:
-    """Redact header names without changing the case or order of their values."""
+    """Redact ignored values and decode byte headers so they round-trip through Requests unchanged."""
     ignored_headers = {name.lower() for name in ignored_parameters or []}
     return CaseInsensitiveDict(
-        (name, 'REDACTED' if name.lower() in ignored_headers else decode(value))
+        (
+            name,
+            'REDACTED'
+            if name.lower() in ignored_headers
+            else (value if value == SKIP_HEADER.encode() else decode(value, encoding='latin-1')),
+        )
         for name, value in headers.items()
     )
 
@@ -160,8 +190,11 @@ def normalize_url(url: str, ignored_parameters: ParamList) -> str:
     """Normalize and filter a URL. This includes request parameters, IDN domains, scheme, host,
     port, etc.
     """
-    url = filter_url(url, ignored_parameters)
-    return url_normalize(url) or ''
+    url_tokens = urlparse(url)
+    query = normalize_params(url_tokens.query, ignored_parameters)
+    # The URL normaliser collapses literal plus signs, spaces and empty query values.
+    base_url = url_normalize(urlunparse(url_tokens._replace(query=''))) or ''
+    return urlunparse(urlparse(base_url)._replace(query=query))
 
 
 def normalize_body(
@@ -170,10 +203,19 @@ def normalize_body(
     content_root_key: Optional[str] = None,
 ) -> bytes:
     """Normalize and filter a request body if possible, depending on Content-Type"""
+    return _normalize_body(request, ignored_parameters, content_root_key)[0]
+
+
+def _normalize_body(
+    request: AnyPreparedRequest,
+    ignored_parameters: ParamList,
+    content_root_key: Optional[str] = None,
+) -> Tuple[bytes, bool]:
     if not request.body:
-        return b''
+        return b'', False
 
     norm_body: Union[str, bytes] = request.body
+    redacted = False
 
     # Handle the case where the request body is a file-like object
     if hasattr(request.body, 'read'):
@@ -184,17 +226,21 @@ def normalize_body(
             logger.warning(f'Unable to reset original request body: {e}', exc_info=True)
 
     try:
-        content_type = request.headers['Content-Type'].split(';')[0].lower()
+        content_type = (
+            decode(request.headers['Content-Type'], encoding='latin-1').split(';')[0].lower()
+        )
     except (AttributeError, KeyError):
         content_type = ''
 
     # Filter and sort params if possible
     if is_json_content_type(content_type):
-        norm_body = normalize_json_body(norm_body, ignored_parameters, content_root_key)
+        norm_body, redacted = _normalize_json_body(norm_body, ignored_parameters, content_root_key)
     elif content_type == 'application/x-www-form-urlencoded':
-        norm_body = normalize_params(norm_body, ignored_parameters)
+        filtered = normalize_params(norm_body, ignored_parameters)
+        redacted = bool(ignored_parameters) and filtered != normalize_params(norm_body)
+        norm_body = filtered
 
-    return encode(norm_body)
+    return encode(norm_body), redacted
 
 
 def normalize_json_body(
@@ -203,33 +249,64 @@ def normalize_json_body(
     content_root_key: Optional[str] = None,
 ) -> Union[str, bytes]:
     """Normalize and filter a request body with serialized JSON data"""
+    return _normalize_json_body(original_body, ignored_parameters, content_root_key)[0]
+
+
+def _normalize_json_body(
+    original_body: Union[str, bytes],
+    ignored_parameters: ParamList,
+    content_root_key: Optional[str] = None,
+    force: bool = False,
+) -> Tuple[Union[str, bytes], bool]:
     if len(original_body) <= 2 or (
-        len(original_body) > MAX_NORM_BODY_SIZE and not ignored_parameters
+        len(original_body) > MAX_NORM_BODY_SIZE and not ignored_parameters and not force
     ):
-        return original_body
+        return original_body, False
+
+    duplicate_members = False
+
+    def collect_pairs(pairs):
+        nonlocal duplicate_members
+        values = dict(pairs)
+        duplicate_members |= len(values) != len(pairs)
+        return values
 
     try:
-        body = json.loads(decode(original_body))
-        if content_root_key and isinstance(body, dict) and content_root_key in body:
-            body[content_root_key] = filter_sort_json(body[content_root_key], ignored_parameters)
-        else:
-            body = filter_sort_json(body, ignored_parameters)
-        return json.dumps(body)
+        body = _json.loads(decode(original_body), object_pairs_hook=collect_pairs)
     # If it's invalid JSON, then don't mess with it
-    except (AttributeError, TypeError, ValueError):
+    except (json.JSONDecodeError, UnicodeDecodeError):
         logger.debug('Invalid JSON body')
-        return original_body
+        return original_body, False
+
+    if content_root_key and isinstance(body, dict) and content_root_key in body:
+        selected = body[content_root_key]
+        filtered = filter_sort_json(selected, ignored_parameters)
+        redacted = filtered is not selected and filtered != selected
+        body[content_root_key] = filtered
+    else:
+        filtered = filter_sort_json(body, ignored_parameters)
+        redacted = filtered is not body and filtered != body
+        body = filtered
+    return _json.dumps(body), redacted or duplicate_members
 
 
 def normalize_params(value: Union[str, bytes], ignored_parameters: ParamList = None) -> str:
     """Normalize and filter urlencoded params from either a URL or request body with form data"""
-    value = decode(value)
-    params = parse_qsl(value)
+    components = decode(value).split('&')
+    params = parse_qsl(
+        '&'.join(component for component in components if '=' in component),
+        keep_blank_values=True,
+        errors='surrogateescape',
+    )
     params = filter_sort_multidict(params, ignored_parameters)
-    query_str = urlencode(params)
+    query_str = urlencode(params, errors='surrogateescape')
 
-    # parse_qsl doesn't handle key-only params, so add those here
-    key_only_params = [k for k in value.split('&') if k and '=' not in k]
+    # Preserve bare names separately from empty-valued fields, decoding each octet once.
+    key_only_params = [
+        quote_plus(unquote_to_bytes(component.replace('+', ' ')), safe='')
+        for component in components
+        if component and '=' not in component
+    ]
     if key_only_params:
         key_only_param_str = '&'.join(sorted(key_only_params))
         query_str = f'{query_str}&{key_only_param_str}' if query_str else key_only_param_str
@@ -237,22 +314,64 @@ def normalize_params(value: Union[str, bytes], ignored_parameters: ParamList = N
     return query_str
 
 
-def redact_response(response: CachedResponse, ignored_parameters: ParamList) -> CachedResponse:
+def redact_response(
+    response: CachedResponse, ignored_parameters: ParamList, content_root_key: Optional[str] = None
+) -> CachedResponse:
     """Redact any ignored parameters (potentially containing sensitive info) from a cached request"""
+    ignored_parameters = tuple(ignored_parameters or ())
     if ignored_parameters:
-        response.url = filter_url(response.url, ignored_parameters)
-        response.request.url = filter_url(response.request.url, ignored_parameters)
-        response.headers = normalize_headers(response.headers, ignored_parameters)
-        response.request.headers = normalize_headers(response.request.headers, ignored_parameters)
-        response.request.body = normalize_body(response.request, ignored_parameters)
+        for cached_response in [response, *response.history]:
+            cached_response.url = filter_url(cached_response.url, ignored_parameters)
+            _redact_headers(cached_response, ignored_parameters)
+            for request in (cached_response.request, cached_response._next):
+                if request is None:
+                    continue
+                url = filter_url(request.url, ignored_parameters)
+                body, body_redacted = _normalize_body(request, ignored_parameters, content_root_key)
+                if url != request.url and url != filter_url(request.url, None):
+                    _record_redaction(request, 'url')
+                if body_redacted:
+                    _record_redaction(request, 'body')
+                    request.body = body
+                request.url = url
+                _redact_headers(request, ignored_parameters)
+                _redact_cookie_jar(request, ignored_parameters)
     return response
 
 
-def filter_sort_json(data: Union[List, Mapping], ignored_parameters: ParamList):
+def _redact_headers(obj, ignored_parameters: ParamList):
+    ignored = {name.lower() for name in ignored_parameters or []}
+    _record_redaction(
+        obj, *(f'header:{name.lower()}' for name in obj.headers if name.lower() in ignored)
+    )
+    obj.headers = normalize_headers(obj.headers, ignored_parameters)
+
+
+def _record_redaction(obj, *fields: str):
+    if fields:
+        previous = getattr(obj, 'redacted_fields', None)
+        obj.redacted_fields = sorted(
+            set(previous if previous is not None else ['unknown']) | set(fields)
+        )
+
+
+def _redact_cookie_jar(request: AnyPreparedRequest, ignored_parameters: ParamList):
+    if 'cookie' in {name.lower() for name in ignored_parameters or []}:
+        if getattr(request, '_cookies', None):
+            _record_redaction(request, 'cookies')
+        # CachedRequest may share this jar with the live request, so replace it instead of clearing it.
+        if isinstance(request, PreparedRequest):
+            request._cookies = RequestsCookieJar()  # type: ignore[attr-defined]
+        else:
+            request.cookies = RequestsCookieJar()
+
+
+def filter_sort_json(data, ignored_parameters: ParamList):
     if isinstance(data, Mapping):
         return filter_sort_dict(data, ignored_parameters)
-    else:
+    elif isinstance(data, list):
         return filter_sort_list(data, ignored_parameters)
+    return data
 
 
 def filter_sort_dict(

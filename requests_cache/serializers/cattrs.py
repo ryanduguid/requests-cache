@@ -17,8 +17,7 @@ from __future__ import annotations
 from collections.abc import MutableMapping
 from datetime import datetime, timedelta
 from decimal import Decimal
-from functools import singledispatchmethod
-from json import JSONDecodeError
+from functools import partial, singledispatchmethod
 from typing import Callable, Dict, ForwardRef, List, Optional, Union
 
 import attrs
@@ -27,8 +26,10 @@ from requests.adapters import HTTPAdapter
 from requests.cookies import RequestsCookieJar, cookiejar_from_dict
 from requests.exceptions import RequestException
 from requests.structures import CaseInsensitiveDict
+from urllib3.util import SKIP_HEADER  # type: ignore[attr-defined]
 
-from .._utils import is_json_content_type
+from .._utils import decode, is_json_content_type
+from .._json import decode_float
 from ..models import CachedResponse, DecodedContent
 from .pipeline import Stage
 
@@ -55,6 +56,7 @@ class CattrStage(Stage):
         factory: A callable that returns a ``cattrs`` converter to start from instead of a new
             ``Converter``. Mainly useful for preconf converters.
         decode_content: Save response body in human-readable format, if possible
+        allow_json_numbers: Decode JSON numbers only when the storage format preserves their values
 
     Notes on ``decode_content`` option:
 
@@ -71,13 +73,17 @@ class CattrStage(Stage):
         self,
         factory: Optional[Callable[..., Converter]] = None,
         decode_content: bool = False,
+        allow_json_numbers: bool = True,
         **kwargs,
     ):
         self.converter = init_converter(factory, **kwargs)
         self.decode_content = decode_content
+        self.allow_json_numbers = allow_json_numbers
 
     def copy(self) -> 'CattrStage':
-        stage = CattrStage(decode_content=self.decode_content)
+        stage = CattrStage(
+            decode_content=self.decode_content, allow_json_numbers=self.allow_json_numbers
+        )
         stage.converter = self.converter
         return stage
 
@@ -88,7 +94,11 @@ class CattrStage(Stage):
     @dumps.register
     def _(self, value: CachedResponse) -> dict:
         response_dict = self.converter.unstructure(value)
-        return _decode_content(value, response_dict) if self.decode_content else response_dict
+        return (
+            _decode_content(value, response_dict, self.allow_json_numbers)
+            if self.decode_content
+            else response_dict
+        )
 
     @singledispatchmethod
     def loads(self, value):
@@ -103,6 +113,7 @@ def init_converter(
     factory: Optional[Callable[..., Converter]] = None,
     convert_datetime: bool = True,
     convert_timedelta: bool = True,
+    convert_headers: bool = False,
 ) -> Converter:
     """Make a converter to structure and unstructure nested objects within a
     :py:class:`.CachedResponse`
@@ -111,6 +122,7 @@ def init_converter(
         factory: An optional factory function that returns a ``cattrs`` converter
         convert_datetime: May be set to ``False`` for pre-configured converters that already have
             datetime support
+        convert_headers: Encode byte-valued headers for JSON without changing their transport behaviour
     """
     factory = factory or Converter
     try:
@@ -134,9 +146,12 @@ def init_converter(
     # Convert dict-like objects to and from plain dicts
     converter.register_unstructure_hook(RequestsCookieJar, lambda obj: dict(obj.items()))
     converter.register_structure_hook(RequestsCookieJar, lambda obj, cls: cookiejar_from_dict(obj))
-    converter.register_unstructure_hook(CaseInsensitiveDict, dict)
+    converter.register_unstructure_hook(
+        CaseInsensitiveDict, _unstructure_headers if convert_headers else dict
+    )
     converter.register_structure_hook(
-        CaseInsensitiveDict, lambda obj, cls: CaseInsensitiveDict(obj)
+        CaseInsensitiveDict,
+        _structure_headers if convert_headers else lambda obj, cls: CaseInsensitiveDict(obj),
     )
 
     # Tell cattrs to ignore DecodedContent; this will be handled separately in `CattrStage.loads()`
@@ -165,6 +180,30 @@ def init_converter(
     return converter
 
 
+def _unstructure_headers(headers: CaseInsensitiveDict) -> dict:
+    """Keep urllib3's literal byte value distinct from its string control value."""
+    return {
+        name: (
+            {'__requests_cache_header_bytes__': SKIP_HEADER}
+            if value == SKIP_HEADER.encode()
+            else value.decode('latin-1')
+            if isinstance(value, bytes)
+            else value
+        )
+        for name, value in headers.items()
+    }
+
+
+def _structure_headers(headers: dict, cls) -> CaseInsensitiveDict:
+    marker = {'__requests_cache_header_bytes__': SKIP_HEADER}
+    return CaseInsensitiveDict(
+        {
+            name: SKIP_HEADER.encode() if value == marker else value
+            for name, value in headers.items()
+        }
+    )
+
+
 def make_decimal_timedelta_converter(**kwargs) -> Converter:
     """Make a converter that uses Decimals instead of floats to represent timedelta objects"""
     converter = Converter(**kwargs)
@@ -177,16 +216,30 @@ def make_decimal_timedelta_converter(**kwargs) -> Converter:
     return converter
 
 
-def _decode_content(response: CachedResponse, response_dict: Dict) -> Dict:
+def _decode_content(
+    response: CachedResponse, response_dict: Dict, allow_json_numbers: bool = True
+) -> Dict:
     """Decode response body into a human-readable format, if possible"""
-    ct_header = response.headers.get('Content-Type', '')
+    ct_header = decode(response.headers.get('Content-Type', ''), encoding='latin-1')
 
     # Decode body as JSON
     if is_json_content_type(ct_header):
+        response_dict.pop('_decoded_content', None)
         try:
-            response_dict['_decoded_content'] = response.json()
-            response_dict.pop('_content', None)
-        except (JSONDecodeError, RequestException):
+            decoded = response.json(
+                parse_float=partial(decode_float, dumps=json.dumps)
+                if allow_json_numbers
+                else _reject_json_number,
+                parse_int=_decode_json_int if allow_json_numbers else _reject_json_number,
+                parse_constant=_reject_json_number,
+                object_pairs_hook=_decode_json_object,
+            )
+            _validate_json_strings(decoded)
+            # None is the model's sentinel for no decoded body, so retain the bytes for JSON null.
+            if decoded is not None:
+                response_dict['_decoded_content'] = decoded
+                response_dict.pop('_content', None)
+        except (ValueError, RequestException):
             pass
 
     # Decode body as text
@@ -198,6 +251,40 @@ def _decode_content(response: CachedResponse, response_dict: Dict) -> Dict:
     return response_dict
 
 
+def _decode_json_int(value: str) -> int:
+    number = int(value)
+    # All built-in serialisers support signed 64-bit integers; keep larger values as body bytes.
+    if value == '-0' or not -(2**63) <= number < 2**63:
+        raise ValueError('JSON integer requires binary storage')
+    return number
+
+
+def _reject_json_number(value):
+    raise ValueError('JSON number requires binary storage')
+
+
+def _decode_json_object(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError('Duplicate JSON members require binary storage')
+    for name in result:
+        if '\x00' in name:
+            raise ValueError('JSON member name requires binary storage')
+        name.encode('utf-8')
+    return result
+
+
+def _validate_json_strings(value):
+    if isinstance(value, str):
+        value.encode('utf-8')
+    elif isinstance(value, dict):
+        for item in value.values():
+            _validate_json_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            _validate_json_strings(item)
+
+
 def _encode_content(response: CachedResponse) -> CachedResponse:
     """Re-encode response body if saved as JSON or text (via ``decode_content=True``).
     This has no effect for a binary response body.
@@ -207,7 +294,7 @@ def _encode_content(response: CachedResponse) -> CachedResponse:
         return response
 
     # Encode body as JSON
-    if is_json_content_type(response.headers.get('Content-Type')):
+    if is_json_content_type(decode(response.headers.get('Content-Type'), encoding='latin-1')):
         response._decoded_content = json.dumps(response._decoded_content)
 
     # Encode body back to bytes

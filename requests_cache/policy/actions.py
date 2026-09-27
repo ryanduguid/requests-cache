@@ -1,3 +1,5 @@
+import json
+from collections import Counter
 from datetime import datetime, timedelta
 from logging import DEBUG, getLogger
 from typing import TYPE_CHECKING, Dict, List, Mapping, MutableMapping, Optional, Union
@@ -6,8 +8,8 @@ from attrs import define, field
 from requests import PreparedRequest, Response
 from requests.structures import CaseInsensitiveDict
 
-from .._utils import coalesce
-from ..cache_keys import normalize_headers
+from .._utils import coalesce, decode, encode, is_json_content_type
+from ..cache_keys import _normalize_json_body, normalize_headers, normalize_request
 from ..models import RichMixin
 from . import (
     DO_NOT_CACHE,
@@ -24,7 +26,7 @@ from . import (
 from .settings import CacheSettings
 
 if TYPE_CHECKING:
-    from ..models import CachedRequest, CachedResponse
+    from ..models import AnyPreparedRequest, CachedRequest, CachedResponse
 
 # Nonstandard headers that can be used to override the request method
 METHOD_OVERRIDE_HEADERS = [
@@ -338,39 +340,39 @@ class CacheActions(RichMixin):
     ) -> bool:
         """If the cached response contains Vary, check that the specified request headers match"""
         vary = cached_response.headers.get('Vary')
+        redacted = getattr(cached_response, 'redacted_fields', None)
+        if ((redacted is None or 'unknown' in redacted) and vary == 'REDACTED') or (
+            redacted is not None and 'header:vary' in redacted
+        ):
+            return False
         if not vary:
             return True
-        elif vary == '*':
-            return False
 
-        # Generate a secondary cache key based on Vary for both the cached request and new request.
-        # If there are redirects, compare the new request against the last request in the chain.
+        # Generate a secondary cache key for the headers nominated by Vary.
+        # Cookie checks use the final request, whose header includes redirect updates.
         match_headers = [k.strip().lower() for k in vary.split(',')]
+        if '*' in match_headers:
+            return False
         vary_request = (
             cached_response.history[-1].request
-            if cached_response.history
+            if cached_response.history and 'cookie' not in match_headers
             else cached_response.request
         )
 
-        # Handle 'Vary: Cookie' separately since requests doesn't store cookies with other headers
+        if not self._vary_headers_available(vary_request, match_headers):
+            return False
+
+        # The prepared Cookie header records what was sent; the jar may contain unsent cookies.
         if 'cookie' in match_headers:
+            if cached_response.history and not self._matches_final_request(vary_request):
+                return False
             if not self._cookies_match(vary_request):
                 logger.debug('Failed Vary check: cookies do not match')
                 return False
-            match_headers.remove('cookie')
+            match_headers = [h for h in match_headers if h != 'cookie']
 
         if not match_headers:
             return True
-
-        # If a Vary header is in ignored_parameters and on the request, treat it as a cache miss
-        # rather than potentially returning an invalid response
-        ignored = {h.lower() for h in (self._settings.ignored_parameters or [])}
-        ignore_overlap = ignored & set(match_headers)
-        if ignore_overlap and any(h in self._request.headers for h in ignore_overlap):
-            logger.debug(
-                f'Failed Vary check: Vary header(s) are in ignored_parameters: {ignore_overlap}'
-            )
-            return False
 
         key_kwargs['match_headers'] = match_headers
         vary_key_cached = create_key(vary_request, **key_kwargs)
@@ -388,16 +390,97 @@ class CacheActions(RichMixin):
             self.vary_cache_key = create_key(self._request, **key_kwargs)
         return headers_match
 
+    def _vary_headers_available(
+        self, cached_request: 'CachedRequest', match_headers: List[str]
+    ) -> bool:
+        """Reject comparisons whose nominated header values were or will be redacted."""
+        cached_headers = normalize_headers(cached_request.headers or {})
+        current_headers = normalize_headers(self._request.headers or {})
+        ignored = {h.lower() for h in (self._settings.ignored_parameters or [])}
+        ignore_overlap = ignored & set(match_headers)
+        if any(h in cached_headers or h in current_headers for h in ignore_overlap):
+            logger.debug(
+                f'Failed Vary check: Vary header(s) are in ignored_parameters: {ignore_overlap}'
+            )
+            return False
+        for request, headers in (
+            (cached_request, cached_headers),
+            (self._request, current_headers),
+        ):
+            redacted = getattr(request, 'redacted_fields', [])
+            if any(f'header:{h}' in (redacted or []) for h in match_headers):
+                return False
+            if (redacted is None or 'unknown' in redacted) and any(
+                headers.get(h) == 'REDACTED' for h in match_headers
+            ):
+                return False
+        return True
+
+    def _matches_final_request(self, cached_request: 'CachedRequest') -> bool:
+        """Only reuse a redirected response when the available final identity matches."""
+        for request in (self._request, cached_request):
+            if not request.method or not request.url:
+                return False
+            body: object = request.body
+            if body is not None and not isinstance(body, (str, bytes)):
+                return False  # Normalising a shared stream would read and rewind the live body.
+        if bool(self._request.body) != bool(cached_request.body):
+            return False
+        try:
+            # Form normalisation may have erased a nonempty body such as 'x='.
+            if not cached_request.body and int(cached_request.headers.get('Content-Length', '0')):
+                return False
+            cached = normalize_request(
+                cached_request,
+                ignored_parameters=None,
+                content_root_key=self._settings.content_root_key,
+            )
+            current = normalize_request(
+                self._request,
+                ignored_parameters=None,
+                content_root_key=self._settings.content_root_key,
+            )
+        except (TypeError, ValueError, RecursionError):
+            return False
+        if not all(
+            _has_complete_identity(original, normalised)
+            for original, normalised in ((cached_request, cached), (self._request, current))
+        ):
+            return False
+
+        return (current.method, current.url) == (cached.method, cached.url) and (
+            encode(current.body) == encode(cached.body)
+            or _identity_body(current, self._settings.content_root_key)
+            == _identity_body(cached, self._settings.content_root_key)
+        )
+
     def _cookies_match(self, cached_request: 'CachedRequest') -> bool:
-        """Compare cookies between the current request and cached request for Vary: Cookie"""
+        """Compare sent Cookie headers, retaining jar checks only for two headerless requests."""
+        cached_headers = normalize_headers(cached_request.headers or {})
+        current_headers = normalize_headers(self._request.headers or {})
+        cached_field = (
+            'Cookie' in cached_headers,
+            cached_headers.get('Cookie'),
+        )
+        current_field = (
+            'Cookie' in current_headers,
+            current_headers.get('Cookie'),
+        )
+        if cached_field[0] or current_field[0]:
+            return cached_field == current_field
+        if any(
+            'cookies' in (getattr(request, 'redacted_fields', None) or [])
+            for request in (cached_request, self._request)
+        ):
+            return False
+        if 'cookie' in {h.lower() for h in (self._settings.ignored_parameters or [])}:
+            return True
 
-        def normalize_cookies(cookies: Optional[Mapping]) -> str:
-            cookie_list = [f'{k}={v}' for k, v in (cookies or {}).items()]
-            return '; '.join(sorted(cookie_list))
-
-        cached_cookies = normalize_cookies(cached_request.cookies)
-        request_cookies = normalize_cookies(getattr(self._request, '_cookies', None))
-        return request_cookies == cached_cookies
+        cached_cookies: Mapping[str, Optional[str]] = cached_request.cookies or {}
+        request_cookies = getattr(self._request, '_cookies', None) or {}
+        if not isinstance(cached_cookies, Mapping) or not isinstance(request_cookies, Mapping):
+            return False
+        return Counter(request_cookies.items()) == Counter(cached_cookies.items())
 
     def _merge_match_headers(self, vary_headers: List[str]) -> Union[List[str], bool]:
         """Merge Vary headers with user-configured match_headers to build a complete
@@ -430,6 +513,73 @@ def _log_vary_diff(
     headers_2 = normalize_headers(headers_2)
     nonmatching = [k for k in vary if headers_1.get(k) != headers_2.get(k)]
     logger.debug(f'Failed Vary check. Non-matching headers: {", ".join(nonmatching)}')
+
+
+def _identity_body(request: 'AnyPreparedRequest', content_root_key: Optional[str]) -> bytes:
+    """Compare JSON consistently when one large body was normalised before storage."""
+    body = encode(request.body)
+    content_type = decode(request.headers.get('Content-Type', ''), encoding='latin-1')
+    if is_json_content_type(content_type.split(';', 1)[0].lower()):
+        try:
+            body = encode(_normalize_json_body(body, None, content_root_key, force=True)[0])
+        except RecursionError:
+            pass  # Keep byte comparison when a large body exceeds the JSON parser's depth limit.
+    return body
+
+
+def _has_complete_identity(
+    original: 'AnyPreparedRequest', normalised: 'AnyPreparedRequest'
+) -> bool:
+    """Use recorded data loss where available, and conservative checks for legacy entries."""
+    if isinstance(original, PreparedRequest) and not hasattr(original, 'redacted_fields'):
+        return True
+    redacted = getattr(original, 'redacted_fields', None)
+    if redacted is not None:
+        if {'url', 'body'} & set(redacted) or (original.body and 'header:content-type' in redacted):
+            return False
+        if 'unknown' not in redacted:
+            return True
+    body = encode(normalised.body)
+    if (
+        'REDACTED' in (normalised.url or '')
+        or b'REDACTED' in encode(original.body)
+        or b'REDACTED' in body
+    ):
+        return False
+    content_type = decode(normalised.headers.get('Content-Type', ''), encoding='latin-1')
+    # Legacy arrays may have lost values under a different content_root_key setting.
+    return not (
+        (body and content_type == 'REDACTED')
+        or (
+            is_json_content_type(content_type.split(';', 1)[0].lower())
+            and _has_ambiguous_json_body(body)
+        )
+    )
+
+
+def _has_ambiguous_json_body(body: bytes) -> bool:
+    try:
+        data = json.loads(body, parse_int=str, parse_float=str)
+    except RecursionError:
+        return True
+    except ValueError:
+        return False
+    # A previous content_root_key can name any immediate member, even if settings later change.
+    if isinstance(data, list) or (
+        isinstance(data, dict) and any(isinstance(value, list) for value in data.values())
+    ):
+        return True
+    pending = [data]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str) and 'REDACTED' in value:
+            return True
+        if isinstance(value, dict):
+            pending.extend(value)
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return False
 
 
 def _log_cache_criteria(operation: str, criteria: Dict):

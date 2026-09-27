@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import Dict, Iterable, Optional, Union
 
 from attrs import define, field
@@ -41,7 +42,10 @@ class CacheSettings(RichMixin):
     disabled: bool = field(default=False)
     expire_after: ExpirationTime = field(default=None)
     filter_fn: FilterCallback = field(default=None)
-    ignored_parameters: Iterable[str] = field(default=DEFAULT_IGNORED_PARAMS)
+    ignored_parameters: Iterable[str] = field(
+        default=DEFAULT_IGNORED_PARAMS,
+        converter=lambda values: tuple(values) if isinstance(values, Iterator) else values,
+    )
     key_fn: KeyCallback = field(default=None)
     match_headers: Union[Iterable[str], bool] = field(default=False)
     only_if_cached: bool = field(default=False)

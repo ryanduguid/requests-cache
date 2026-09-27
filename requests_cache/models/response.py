@@ -84,6 +84,8 @@ class CachedResponse(RichMixin, BaseResponse):
     request: CachedRequest = field(factory=CachedRequest)  # type: ignore
     status_code: int = field(default=0)
     url: str = field(default=None)
+    # None denotes legacy data whose redaction history is unknown.
+    redacted_fields: Optional[List[str]] = field(default=None)
 
     def __attrs_post_init__(self):
         # Not using created_at field default due to possible bug on Windows with omit_if_default
@@ -96,9 +98,12 @@ class CachedResponse(RichMixin, BaseResponse):
         """Create a CachedResponse based on an original Response or another CachedResponse object"""
         if isinstance(response, CachedResponse):
             obj = attr.evolve(response, **kwargs)
+            obj.request = obj.request.copy()
+            obj._next = obj._next.copy() if obj._next else None
             obj._convert_redirects()
             return obj
 
+        kwargs.setdefault('redacted_fields', [])
         obj = cls(**kwargs)
 
         # Copy basic attributes
@@ -186,6 +191,7 @@ class CachedResponse(RichMixin, BaseResponse):
 
     def __setstate__(self, state):
         """Override pickling behavior from ``requests.Response.__setstate__``"""
+        self.redacted_fields = None
         for name, value in state.items():
             setattr(self, name, value)
 

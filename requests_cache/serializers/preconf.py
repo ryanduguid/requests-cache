@@ -45,11 +45,17 @@ utf8_serializer = SerializerPipeline([utf8_encoder], 'utf8', is_binary=True)  #:
 bson_preconf_stage = make_stage(
     'cattr.preconf.bson', convert_datetime=False
 )  #: Pre-serialization for BSON
-json_preconf_stage = make_stage('cattr.preconf.json', b64=True)  #: Pre-serialization for JSON
+json_preconf_stage = make_stage(
+    'cattr.preconf.json', b64=True, convert_headers=True
+)  #: Pre-serialization for JSON
 msgpack_preconf_stage = make_stage('cattr.preconf.msgpack')  #: Pre-serialization for msgpack
-orjson_preconf_stage = make_stage('cattr.preconf.orjson', b64=True)  #: Pre-serialization for orjson
+orjson_preconf_stage = make_stage(
+    'cattr.preconf.orjson', b64=True, convert_headers=True
+)  #: Pre-serialization for orjson
 toml_preconf_stage = make_stage('cattr.preconf.tomlkit')  #: Pre-serialization for TOML
-ujson_preconf_stage = make_stage('cattr.preconf.ujson', b64=True)  #: Pre-serialization for ujson
+ujson_preconf_stage = make_stage(
+    'cattr.preconf.ujson', b64=True, convert_headers=True
+)  #: Pre-serialization for ujson
 yaml_preconf_stage = make_stage('cattr.preconf.pyyaml')  #: Pre-serialization for YAML
 
 # Basic serializers with no additional dependencies
@@ -166,7 +172,7 @@ except ImportError as e:
 
 # DynamoDB document serializer
 dynamodb_preconf_stage = CattrStage(
-    factory=make_decimal_timedelta_converter, convert_timedelta=False
+    factory=make_decimal_timedelta_converter, convert_timedelta=False, allow_json_numbers=False
 )  #: Pre-serialization steps for DynamoDB
 convert_float_stage = Stage(dumps=_convert_floats, loads=lambda x: x)
 dynamodb_document_serializer = SerializerPipeline(

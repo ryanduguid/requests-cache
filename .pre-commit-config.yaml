@@ -32,6 +32,8 @@ repos:
     rev: v0.1
     hooks:
       - id: xenon
+        # Run serially so CPU count does not change the average being checked.
+        require_serial: true
         args: [--max-average=A, --max-modules=B, --max-absolute=C]
   - repo: https://github.com/crate-ci/typos
     rev: v1.48.0

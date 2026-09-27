@@ -44,6 +44,9 @@ YAML files (requires `pyyaml`):
 > ['/home/user/http_cache/4dc151d95200ec.yaml']
 ```
 
+Clearing the cache removes response files and stored redirects while retaining the SQLite metadata
+files used by other open cache objects. These metadata files are excluded from response paths.
+
 ## Limiting Cache Size
 If you want to limit the size of the cache, you can enable LRU caching with the `max_cache_bytes` option:
 
@@ -91,6 +94,10 @@ If you use multiple cache objects in the same directory, use a shared {py:class}
 >>> session1 = CachedSession(backend='filesystem', cache_name='cache_dir', lock=lock)
 >>> session2 = CachedSession(backend='filesystem', cache_name='cache_dir', lock=lock)
 ```
+
+Use the same response format and metadata layout for all cache objects sharing a directory.
+Do not mix caches with and without LRU tracking. Clearing response files and the separate metadata
+databases is not atomic; the shared lock must also coordinate clearing with other file operations.
 
 - If you're using the {py:mod}`.multiprocessing` module, use a {py:class}`multiprocessing.RLock` instead.
 - If you're using multiple processes by other means, use a {py:attr}`filelock.FileLock` from the [py-filelock](https://py-filelock.readthedocs.io/) library.

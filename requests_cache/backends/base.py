@@ -25,7 +25,7 @@ from ..policy import DEFAULT_CACHE_NAME, CacheSettings, ExpirationTime
 from ..serializers import SerializerType, init_serializer
 
 # Specific exceptions that may be raised during deserialization
-DESERIALIZE_ERRORS = (AttributeError, ImportError, PickleError, TypeError, ValueError)
+DESERIALIZE_ERRORS = (AttributeError, EOFError, ImportError, PickleError, TypeError, ValueError)
 
 logger = getLogger(__name__)
 
@@ -99,7 +99,9 @@ class BaseCache:
         """
         cache_key = cache_key or self.create_key(response.request)
         cached_response = CachedResponse.from_response(response, expires=expires)
-        cached_response = redact_response(cached_response, self._settings.ignored_parameters)
+        cached_response = redact_response(
+            cached_response, self._settings.ignored_parameters, self._settings.content_root_key
+        )
         self.responses[cache_key] = cached_response
 
         # Save redirect aliases, unless this is a revalidation (i.e., it was saved previously)

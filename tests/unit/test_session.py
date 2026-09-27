@@ -120,7 +120,7 @@ def test_response_defaults(mock_session):
     response_1 = mock_session.get(MOCKED_URL)
     response_2 = mock_session.get(MOCKED_URL)
     response_3 = mock_session.get(MOCKED_URL)
-    cache_key = '2863cc857f1a31e0'
+    cache_key = '1d55e271c1e7c031'
 
     assert response_1.cache_key == cache_key
     assert isinstance(response_1.created_at, datetime)
@@ -404,6 +404,316 @@ def test_match_headers__vary_alternating(mock_session):
     # Third round: still cache hits
     assert mock_session.get(MOCKED_URL_VARY, headers=headers_json).from_cache is True
     assert mock_session.get(MOCKED_URL_VARY, headers=headers_html).from_cache is True
+
+
+@pytest.mark.parametrize(
+    'first_kwargs, next_kwargs, expected_hit',
+    [
+        ({'headers': {'Cookie': 'theme=light'}}, {'headers': {'Cookie': 'theme=dark'}}, False),
+        ({'headers': {'Cookie': 'theme=light'}}, {'headers': {'Cookie': 'theme=light'}}, True),
+        ({'headers': {'Cookie': b'theme=light'}}, {'headers': {'Cookie': b'theme=light'}}, True),
+        ({'headers': {'Cookie': b'theme=light'}}, {'headers': {'Cookie': 'theme=light'}}, True),
+        ({'headers': {'Cookie': b''}}, {'headers': {'Cookie': b''}}, True),
+        (
+            {'headers': {'Cookie': b'theme=\xc3\xa9'}},
+            {'headers': {'Cookie': 'theme=\u00e9'}},
+            False,
+        ),
+        ({'headers': {'Cookie': 'theme=\u00e9'}}, {'headers': {'Cookie': b'theme=\xe9'}}, True),
+        ({'headers': {'Cookie': 'theme=light'}}, {}, False),
+        ({}, {'headers': {'Cookie': 'theme=light'}}, False),
+        ({'headers': {'Cookie': ''}}, {}, False),
+        ({}, {'headers': {'Cookie': ''}}, False),
+        (
+            {'headers': {'Cookie': 'theme=light'}, 'cookies': {'jar': 'same'}},
+            {'headers': {'Cookie': 'theme=dark'}, 'cookies': {'jar': 'same'}},
+            False,
+        ),
+        (
+            {'headers': {'Cookie': 'theme=light'}, 'cookies': {'jar': 'first'}},
+            {'headers': {'Cookie': 'theme=light'}, 'cookies': {'jar': 'second'}},
+            True,
+        ),
+        (
+            {'headers': {'Cookie': 'theme=light; theme=dark'}},
+            {'headers': {'Cookie': 'theme=dark; theme=light'}},
+            False,
+        ),
+        (
+            {'headers': {'Cookie': 'label="blue; red"'}},
+            {'headers': {'Cookie': 'label="blue; green"'}},
+            False,
+        ),
+    ],
+)
+def test_match_headers__vary_cookie_header(mock_session, first_kwargs, next_kwargs, expected_hit):
+    """Match the Cookie header sent on the wire, including explicit jar overrides."""
+    mock_session.trust_env = False
+    mock_session.mock_adapter.register_uri(
+        'GET', MOCKED_URL, headers={'Vary': 'Cookie'}, text='first variant'
+    )
+    mock_session.get(MOCKED_URL, **first_kwargs)
+
+    response = mock_session.get(MOCKED_URL, only_if_cached=True, **next_kwargs)
+
+    assert response.status_code == (200 if expected_hit else 504)
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('vary', ['*', ' * ', '*, Accept-Language', 'Accept-Language, *'])
+def test_match_headers__vary_wildcard_member(mock_session, vary):
+    mock_session.trust_env = False
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': vary})
+    mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'})
+
+    response = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'}, only_if_cached=True)
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('only_if_cached', [False, True])
+@pytest.mark.parametrize('request_final', [False, True])
+@pytest.mark.parametrize('cookie_changed', [False, True])
+def test_match_headers__vary_cookie_redirect_target(
+    mock_session, only_if_cached, request_final, cookie_changed
+):
+    """A redirect's initial Cookie header cannot validate its destination's response."""
+    mock_session.trust_env = False
+    start_url, final_url = f'{MOCKED_URL}/start', f'{MOCKED_URL}/final'
+    mock_session.mock_adapter.register_uri(
+        'GET', start_url, status_code=302, headers={'Location': final_url}
+    )
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        final_url,
+        headers={'Vary': 'Cookie'},
+        text=lambda request, context: request.headers.get('Cookie', ''),
+    )
+    mock_session.cookies.set('fixed', '1', path='/')
+    mock_session.cookies.set('theme', 'light', path='/text/final')
+    first = mock_session.get(start_url)
+    assert 'theme=light' in first.text
+    assert 'theme=' not in first.history[0].request.headers['Cookie']
+    if request_final:
+        # Imported responses can retain redirect history at the final URL.
+        mock_session.cache.save_response(first)
+    stored_request = first.request if request_final else first.history[0].request
+    stored = mock_session.cache.get_response(mock_session.cache.create_key(stored_request))
+    assert stored.history
+
+    if cookie_changed:
+        mock_session.cookies.set('theme', 'dark', path='/text/final')
+    second = mock_session.get(
+        final_url if request_final else start_url, only_if_cached=only_if_cached
+    )
+
+    cache_only_miss = only_if_cached and (cookie_changed or not request_final)
+    assert second.status_code == (504 if cache_only_miss else 200)
+    if not cache_only_miss:
+        assert f'theme={"dark" if cookie_changed else "light"}' in second.text
+        assert second.from_cache is not cookie_changed
+    calls = 0 if only_if_cached else int(not request_final) + int(cookie_changed)
+    assert mock_session.mock_adapter.call_count == 2 + calls
+
+
+def test_match_headers__vary_cookie_redirect_final_explicit_header(mock_session):
+    """A direct final request uses its sent Cookie, even when the jar has changed."""
+    mock_session.trust_env = False
+    start_url, final_url = f'{MOCKED_URL}/start', f'{MOCKED_URL}/final'
+    mock_session.mock_adapter.register_uri(
+        'GET', start_url, status_code=302, headers={'Location': final_url}
+    )
+    mock_session.mock_adapter.register_uri(
+        'GET', final_url, headers={'Vary': 'Cookie, X-Variant'}, text='light'
+    )
+    mock_session.headers['X-Variant'] = 'one'
+    mock_session.cookies.set('theme', 'light', path='/text/final')
+    first = mock_session.get(start_url, headers={'Cookie': 'explicit=start'})
+    assert first.history[0].request.headers['Cookie'] == 'explicit=start'
+    assert first.request.headers['Cookie'] == 'theme=light'
+    mock_session.cache.save_response(first)
+    mock_session.cookies.set('theme', 'dark', path='/text/final')
+
+    second = mock_session.get(final_url, headers={'Cookie': b'theme=light'}, only_if_cached=True)
+    assert second.status_code == 200
+    assert second.from_cache
+    assert mock_session.mock_adapter.call_count == 2
+
+    third = mock_session.get(
+        final_url, headers={'Cookie': 'theme=light', 'X-Variant': 'two'}, only_if_cached=True
+    )
+    assert third.status_code == 504
+    assert mock_session.mock_adapter.call_count == 2
+
+
+@pytest.mark.parametrize(
+    'first_query, second_query',
+    [
+        ('?q=a%2Bb', '?q=a+b'),
+        ('?x=', ''),
+        ('?x=&x=1', '?x=1'),
+    ],
+)
+def test_cache_key__query_variants(mock_session, first_query, second_query):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Authorization']
+    urls = [f'{MOCKED_URL}/{query}' for query in (first_query, second_query)]
+    for url, body in zip(urls, ['first fixture', 'second fixture'], strict=False):
+        mock_session.mock_adapter.register_uri('GET', url, text=body, complete_qs=True)
+    assert mock_session.get(urls[0]).text == 'first fixture'
+
+    cached = mock_session.get(urls[1], only_if_cached=True)
+
+    assert cached.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+    response = mock_session.get(urls[1])
+    assert response.text == 'second fixture'
+    assert not response.from_cache
+    assert mock_session.mock_adapter.call_count == 2
+
+
+def test_cache_key__legacy_ambiguous_query_entry():
+    """Old redaction could erase a blank field; an unchanged old key must not restore that hit."""
+    with CachedSession(backend='memory') as session:
+        session.trust_env = False
+        url = 'https://example.com/'
+        # Produced before query normalisation retained empty values, for both / and /?x=.
+        session.cache.responses['db31883d482a4b46'] = CachedResponse(
+            url=url,
+            status_code=200,
+            content=b'legacy blank fixture',
+            request=Request('GET', url).prepare(),
+        )
+        with patch.object(Session, 'send', side_effect=AssertionError('Unexpected network call')):
+            response = session.get(url, only_if_cached=True)
+        assert response.status_code == 504
+
+
+@pytest.mark.parametrize('query', ['b=2&a=1', 'q=hello%20world&a=1'])
+def test_match_headers__vary_cookie_redirect_final_query(mock_session, query):
+    """Stored query formatting must not reject an identical direct final request."""
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Authorization']
+    start_url = f'{MOCKED_URL}/start'
+    final_url = f'{MOCKED_URL}/final?{query}'
+    mock_session.mock_adapter.register_uri(
+        'GET', start_url, status_code=302, headers={'Location': final_url}
+    )
+    mock_session.mock_adapter.register_uri(
+        'GET', final_url, headers={'Vary': 'Cookie'}, text='fixture'
+    )
+    mock_session.cookies.set('theme', 'light', path='/')
+    first = mock_session.get(start_url)
+    mock_session.cache.save_response(first)
+
+    second = mock_session.get(final_url, only_if_cached=True)
+
+    assert second.status_code == 200
+    assert second.from_cache
+    assert mock_session.mock_adapter.call_count == 2
+
+
+@pytest.mark.parametrize('match_headers', [False, ['X-Variant']])
+@pytest.mark.parametrize(
+    'first_value, next_value, expected_hit',
+    [
+        (b'\xc3\xa9', '\u00e9', False),
+        (b'\xe9', '\u00e9', True),
+        (b'\xc3\xa9', b'\xc3\xa9', True),
+    ],
+)
+def test_match_headers__vary_byte_values(
+    mock_session, match_headers, first_value, next_value, expected_hit
+):
+    """Primary and Vary keys must preserve the bytes sent in request headers."""
+    mock_session.trust_env = False
+    mock_session.settings.match_headers = match_headers
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': 'X-Variant'})
+    mock_session.get(MOCKED_URL, headers={'X-Variant': first_value})
+
+    response = mock_session.get(MOCKED_URL, headers={'X-Variant': next_value}, only_if_cached=True)
+
+    assert response.status_code == (200 if expected_hit else 504)
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('vary', ['Cookie', 'Cookie, Accept-Language'])
+def test_match_headers__vary_ignored_cookie(mock_session, vary):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['cOoKiE']
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': vary})
+    mock_session.get(MOCKED_URL, headers={'Cookie': 'theme=light'})
+
+    response = mock_session.get(MOCKED_URL, headers={'Cookie': 'REDACTED'}, only_if_cached=True)
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('vary', ['Cookie', '*'])
+def test_match_headers__vary_redacted_metadata(mock_session, vary):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Vary']
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': vary})
+    mock_session.get(MOCKED_URL, headers={'Cookie': 'theme=light'})
+    mock_session.settings.ignored_parameters = []
+
+    response = mock_session.get(MOCKED_URL, headers={'Cookie': 'theme=light'}, only_if_cached=True)
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('header', ['Cookie', 'Authorization'])
+def test_match_headers__vary_redacted_value(mock_session, header):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = [header]
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': header})
+    mock_session.get(MOCKED_URL, headers={header: 'fabricated-value'})
+    mock_session.settings.ignored_parameters = []
+
+    response = mock_session.get(MOCKED_URL, headers={header: 'REDACTED'}, only_if_cached=True)
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+
+
+def test_ignored_cookie_jar_is_not_saved(mock_session):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Cookie']
+    original_response = mock_session.get(MOCKED_URL, cookies={'theme': 'light'})
+
+    cached_response = mock_session.cache.responses[original_response.cache_key]
+
+    assert cached_response.request.headers['Cookie'] == 'REDACTED'
+    assert not cached_response.request.cookies
+    assert original_response.request.headers['Cookie'] == 'theme=light'
+    assert original_response.request._cookies['theme'] == 'light'
+
+
+@pytest.mark.parametrize('allow_redirects', [True, False])
+def test_ignored_cookie_jar_in_redirect_snapshots(mock_session, allow_redirects):
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Cookie']
+    mock_session.settings.allowable_codes = (200, 302)
+    response = mock_session.get(
+        MOCKED_URL_REDIRECT, cookies={'theme': 'light'}, allow_redirects=allow_redirects
+    )
+    assert response.request._cookies['theme'] == 'light'
+    stored_responses = list(mock_session.cache.responses.values())
+    assert stored_responses
+    if allow_redirects:
+        assert any(stored.history for stored in stored_responses)
+    else:
+        assert any(stored._next for stored in stored_responses)
+
+    for stored in stored_responses:
+        for snapshot in [stored, *stored.history]:
+            for request in (snapshot.request, snapshot._next):
+                if request is not None:
+                    assert request.headers['Cookie'] == 'REDACTED'
+                    assert not request.cookies
 
 
 def test_match_headers__vary_authorization(mock_session):

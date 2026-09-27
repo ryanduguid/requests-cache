@@ -7,14 +7,14 @@
 
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from logging import getLogger
 from os import unlink
 from os.path import getsize, isfile
 from pathlib import Path
 from tempfile import gettempdir
 from time import time
-from typing import Collection, Iterator, List, Optional, Tuple, Type
+from typing import Collection, Iterator, List, Optional, Sequence, Tuple, Type, cast
 
 from platformdirs import user_cache_dir
 
@@ -249,7 +249,7 @@ class SQLiteDict(BaseStorage):
 
     @contextmanager
     def connection(self, commit=False) -> Iterator[sqlite3.Connection]:
-        """Get a thread-local database connection"""
+        """Use the shared database connection while holding its reentrant lock."""
         with self._lock:
             if not self._connection:
                 logger.debug(f'Opening connection to {self.db_path}:{self.table_name}')
@@ -258,26 +258,27 @@ class SQLiteDict(BaseStorage):
                 )
                 # Note: DBAPI doesn't support integer placeholders
                 if self.busy_timeout is not None:
-                    self._connection.execute(f'PRAGMA busy_timeout={self.busy_timeout}')
+                    self._connection.execute(f'PRAGMA busy_timeout={self.busy_timeout}').close()
                 if self.fast_save:
-                    self._connection.execute('PRAGMA synchronous=OFF')
+                    self._connection.execute('PRAGMA synchronous=OFF').close()
                 if self.wal:
-                    self._connection.execute('PRAGMA journal_mode=WAL')
+                    self._connection.execute('PRAGMA journal_mode=WAL').close()
                 # In WAL mode, default to normal sync mode (best balance between safety/performance)
                 if self.wal and not self.fast_save:
-                    self._connection.execute('PRAGMA synchronous=NORMAL')
+                    self._connection.execute('PRAGMA synchronous=NORMAL').close()
 
-        # Multithreaded write operations must be run in serial
-        if commit and not self._active_transaction:
-            with self._acquire_sqlite_lock():
+            # The connection's statement cache and transaction state also need protection on reads.
+            if commit and not self._active_transaction:
+                with self._acquire_sqlite_lock():
+                    yield self._connection
+            else:
                 yield self._connection
-        # Read operations can be run in parallel (no lock or COMMIT)
-        else:
-            yield self._connection
 
     def close(self):
         """Close any active connections"""
         with self._lock:
+            if self._active_transaction:
+                raise sqlite3.ProgrammingError('Cannot close during a transaction')
             if self._connection:
                 self._connection.close()
                 self._connection = None
@@ -294,20 +295,29 @@ class SQLiteDict(BaseStorage):
             ...         d1[i] = i * 2
 
         """
-        with self._acquire_sqlite_lock():
+        with self.connection(), self._acquire_sqlite_lock():
             yield
 
     @contextmanager
     def _acquire_sqlite_lock(self):
         with self._lock:
             # SQLite waits for its configured timeout and reports lock or other errors.
-            self._connection.execute('BEGIN IMMEDIATE')
+            connection = self._connection
+            connection.execute('BEGIN IMMEDIATE')
             self._active_transaction = True
             try:
                 yield
-                self._connection.commit()
-            except sqlite3.OperationalError:
-                self._connection.rollback()
+                connection.commit()
+            except BaseException as error:
+                try:
+                    connection.rollback()
+                except BaseException as rollback_error:
+                    self._connection = None
+                    try:
+                        connection.close()
+                    finally:
+                        raise error from rollback_error
+                raise
             finally:
                 self._active_transaction = False
 
@@ -321,16 +331,19 @@ class SQLiteDict(BaseStorage):
             raise KeyError
 
     def __getitem__(self, key):
+        return self.deserialize(key, self._get_raw(key))
+
+    def _get_raw(self, key):
         with self.connection() as con:
-            # Using placeholders here with python 3.12+ and concurrency results in the error:
-            # sqlite3.InterfaceError: bad parameter or other API misuse
-            cur = con.execute(f"SELECT value FROM {self.table_name} WHERE key='{key}'")
-            row = cur.fetchone()
-            cur.close()
+            cur = con.execute(f'SELECT value FROM {self.table_name} WHERE key=?', (key,))
+            try:
+                row = cur.fetchone()
+            finally:
+                cur.close()
             if not row:
                 raise KeyError(key)
 
-            return self.deserialize(key, row[0])
+        return row[0]
 
     def __setitem__(self, key, value):
         self._write(key, value)
@@ -346,12 +359,27 @@ class SQLiteDict(BaseStorage):
             )
 
     def __iter__(self):
-        with self.connection() as con:
-            for row in con.execute(f'SELECT key FROM {self.table_name}'):
-                yield row[0]
+        with (
+            self.connection() as con,
+            closing(con.execute(f'SELECT key FROM {self.table_name}')) as cursor,
+        ):
+            keys = [row[0] for row in cursor]
+        yield from keys
 
     def __len__(self):
         return self.count()
+
+    def popitem(self):
+        # The inherited method would snapshot every remaining key on each removal.
+        with (
+            self.connection() as con,
+            closing(con.execute(f'SELECT key FROM {self.table_name} LIMIT 1')) as cursor,
+        ):
+            row = cursor.fetchone()
+        if row is None:
+            raise KeyError('Cache is empty')
+        key = row[0]
+        return key, self.pop(key)
 
     def bulk_delete(self, keys=None, values=None):
         """Delete multiple items from the cache, without raising errors for any missing items.
@@ -370,6 +398,8 @@ class SQLiteDict(BaseStorage):
 
     def clear(self):
         with self._lock:
+            if self._active_transaction:
+                raise sqlite3.ProgrammingError('Cannot clear during a transaction')
             with self.connection(commit=True) as con:
                 con.execute(f'DROP TABLE IF EXISTS {self.table_name}')
             self.init_db()
@@ -414,14 +444,17 @@ class SQLiteDict(BaseStorage):
         limit: Optional[int] = None,
         expired: bool = True,
     ) -> Iterator[CachedResponse]:
-        """Get cache values in sorted order; see :py:meth:`.SQLiteCache.sorted` for usage details"""
+        """Select ordered keys, then load current values without holding a cursor between yields.
+
+        See :py:meth:`.SQLiteCache.sorted` for usage details.
+        """
         # Get sort key, direction, and limit
         if key not in ['expires', 'size', 'key']:
             raise ValueError(f'Invalid sort key: {key}')
         if key == 'size':
             key = 'LENGTH(value)'
         direction = 'DESC' if reversed else 'ASC'
-        limit_expr = f'LIMIT {limit}' if limit else ''
+        limit_expr = 'LIMIT ?' if limit is not None else ''
 
         # Filter out expired items, if specified
         filter_expr = ''
@@ -429,25 +462,54 @@ class SQLiteDict(BaseStorage):
         if not expired:
             filter_expr = 'WHERE expires is null or expires > ?'
             params = (time(),)
+        if limit is not None:
+            params += (limit,)
 
-        with self.connection() as con:
-            for row in con.execute(
-                f'SELECT key, value FROM {self.table_name} {filter_expr}'
-                f'  ORDER BY {key} {direction} {limit_expr}',
-                params,
-            ):
-                result = self.deserialize(row[0], row[1])
-                # Omit any results that can't be deserialized
-                if result:
-                    yield result
+        # ponytail: Key snapshots use O(n) memory; very large caches may need paged selection.
+        with (
+            self.connection() as con,
+            closing(
+                con.execute(
+                    f"SELECT key, CAST(key AS BLOB), typeof(key) = 'text' "
+                    f'FROM {self.table_name} {filter_expr}'
+                    f'  ORDER BY {key} {direction} {limit_expr}',
+                    params,
+                )
+            ) as cursor,
+        ):
+            row_factory = cursor.row_factory
+            if row_factory is not None:
+                cursor.row_factory = lambda cur, row: (
+                    cast(Sequence, row_factory(cur, row))[0],
+                    row[1],
+                    row[2],
+                )
+            keys = cursor.fetchall()
+            with closing(con.cursor()) as encoding_cursor:
+                encoding_cursor.row_factory = None
+                text_factory = con.text_factory
+                try:
+                    con.text_factory = lambda raw: raw.decode('ascii')
+                    encoding = encoding_cursor.execute('PRAGMA encoding').fetchone()[0]
+                finally:
+                    con.text_factory = text_factory
+        for stored_key, raw_key, is_text in keys:
+            # Keep lookup identity independent of connection text factories and type converters.
+            lookup_key = raw_key.decode(encoding) if is_text else raw_key
+            try:
+                value = self._get_raw(lookup_key)
+            except KeyError:
+                continue
+            result = self.deserialize(stored_key, value)
+            if result is not None:
+                yield result
 
     def vacuum(self):
         # VACUUM cannot run inside a transaction; acquire the lock and run it directly
         with self._lock:
             if self._connection:
                 if self._active_transaction:
-                    self._connection.commit()
-                    self._active_transaction = False
+                    raise sqlite3.ProgrammingError('Cannot vacuum during a transaction')
                 self._connection.execute('VACUUM')
 
 

@@ -5,7 +5,7 @@ from datetime import timedelta
 from os.path import join
 from tempfile import NamedTemporaryFile, gettempdir
 from threading import Thread
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from platformdirs import user_cache_dir
@@ -198,17 +198,14 @@ class TestSQLiteDict(BaseStorageTest):
         cache._connection = None
         cache.vacuum()
 
-    def test_vacuum__commits_active_transaction(self):
+    def test_vacuum__rejects_active_transaction(self):
         cache = self.init_cache()
-        mock_con = MagicMock()
-        cache._connection = mock_con
-        cache._active_transaction = True
-
-        cache.vacuum()
-
-        mock_con.commit.assert_called_once()
-        mock_con.execute.assert_called_once_with('VACUUM')
-        assert cache._active_transaction is False
+        with cache.bulk_commit():
+            cache['key'] = 'fixture'
+            with pytest.raises(sqlite3.ProgrammingError, match='transaction'):
+                cache.vacuum()
+            assert cache['key'] == 'fixture'
+        assert cache['key'] == 'fixture'
 
     @skip_pypy
     @pytest.mark.parametrize('limit', [None, 50])

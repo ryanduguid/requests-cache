@@ -1,11 +1,12 @@
 from datetime import timedelta
+from io import BytesIO
 from unittest.mock import patch
 
 import pytest
 from requests import PreparedRequest, Request
 from requests.cookies import RequestsCookieJar
 
-from requests_cache.cache_keys import create_key
+from requests_cache.cache_keys import create_key, redact_response
 from requests_cache.models import CachedRequest, CachedResponse
 from requests_cache.policy import EXPIRE_IMMEDIATELY, CacheActions, CacheSettings, utcnow
 from tests.conftest import ETAG, HTTPDATE_STR, LAST_MODIFIED, MOCKED_URL, get_mock_response
@@ -418,7 +419,7 @@ def test_vary_cache_key__match_all():
         ({'session': 'abc123'}, {'session': 'abc123'}, True),
         ({'session': 'abc123'}, {'session': 'xyz789'}, False),
         ({'session': 'abc', 'user': 'bob'}, {'session': 'abc', 'user': 'bob'}, True),
-        ({'user': 'bob', 'session': 'abc'}, {'session': 'abc', 'user': 'bob'}, True),
+        ({'user': 'bob', 'session': 'abc'}, {'session': 'abc', 'user': 'bob'}, False),
         ({'session': 'abc', 'user': 'bob'}, {'session': 'abc', 'user': 'alice'}, False),
         ({}, {}, True),
         ({'session': 'abc123'}, {}, False),
@@ -431,11 +432,8 @@ def test_update_from_cached_response__vary_cookie(cached_cookies, new_cookies, e
     new_cookiejar = RequestsCookieJar()
     new_cookiejar.update(new_cookies)
 
-    # Cached response with cookies
-    cached_request = CachedRequest(
-        method='GET',
-        url='https://site.com/page',
-        cookies=cached_cookiejar,
+    cached_request = CachedRequest.from_request(
+        Request('GET', 'https://site.com/page', cookies=cached_cookiejar).prepare()
     )
     cached_response = CachedResponse(
         headers={'Vary': 'Cookie'},
@@ -453,6 +451,155 @@ def test_update_from_cached_response__vary_cookie(cached_cookies, new_cookies, e
     assert actions.send_request is not expected_match
 
 
+@pytest.mark.parametrize('method', ['POST', 'GET'])
+def test_vary_cookie__same_url_redirect_request_identity(method):
+    """A redirect that changes method or body cannot validate the original request."""
+    url = 'https://example.com/item'
+    initial = Request(method, url, data='payload', headers={'Cookie': 'theme=light'}).prepare()
+    final = Request('GET', url, headers={'Cookie': 'theme=dark'}).prepare()
+    current = Request(method, url, data='payload', headers={'Cookie': 'theme=dark'}).prepare()
+    stored = CachedResponse(
+        url=url,
+        status_code=200,
+        headers={'Vary': 'Cookie'},
+        request=CachedRequest.from_request(final),
+        history=[CachedResponse(status_code=303, request=CachedRequest.from_request(initial))],
+    )
+    assert create_key(initial) == create_key(current)
+    actions = CacheActions.from_request(
+        create_key(current),
+        current,
+        CacheSettings(allowable_methods=('GET', 'POST'), only_if_cached=True),
+    )
+
+    actions.update_from_cached_response(stored, create_key)
+
+    assert actions.error_504
+    assert not actions.send_request
+    assert not actions.resend_request
+
+
+@pytest.mark.parametrize('history', [False, True])
+@pytest.mark.parametrize('value', [b'@@@SKIP_HEADER@@@', '@@@SKIP_HEADER@@@'])
+def test_vary_cookie__transport_control(history, value):
+    other = value.decode() if isinstance(value, bytes) else value.encode()
+    cached = Request('GET', 'https://example.com/', headers={'Cookie': value}).prepare()
+    current = Request('GET', cached.url, headers={'Cookie': other}).prepare()
+    response = CachedResponse(
+        status_code=200,
+        request=CachedRequest.from_request(cached),
+        headers={'Vary': 'Cookie'},
+        history=[CachedResponse(status_code=302)] if history else [],
+    )
+    actions = CacheActions.from_request('fixture-key', current, CacheSettings(only_if_cached=True))
+
+    actions.update_from_cached_response(response, create_key)
+
+    assert actions.error_504
+    assert not actions.send_request
+    assert not actions.resend_request
+
+
+@pytest.mark.parametrize(
+    'current, final, ignored, expected',
+    [
+        ({'method': 'POST'}, {}, [], False),
+        (
+            {'data': 'x=', 'headers': {'Content-Type': 'application/x-www-form-urlencoded'}},
+            {},
+            [],
+            False,
+        ),
+        ({'data': 'calf\xe9'}, {'data': b'calf\xc3\xa9'}, [], True),
+        ({'data': b'\x00\xff'}, {'data': b'\x00\xff'}, [], True),
+        ({'json': {'a': 1, 'b': 2}}, {'json': {'b': 2, 'a': 1}}, ['Authorization'], True),
+        ({'data': {'a': '1', 'b': '2'}}, {'data': {'b': '2', 'a': '1'}}, ['Authorization'], True),
+        ({'json': {'a': 2}}, {'json': {'a': 1}}, [], False),
+        ({'data': {'a': '2'}}, {'data': {'a': '1'}}, [], False),
+        ({'params': {'secret': 'REDACTED'}}, {'params': {'secret': 'fixture'}}, ['secret'], False),
+        ({'json': {'secret': 'REDACTED'}}, {'json': {'secret': 'fixture'}}, ['secret'], False),
+        ({'data': {'secret': 'REDACTED'}}, {'data': {'secret': 'fixture'}}, ['secret'], False),
+        ({'json': ['keep']}, {'json': ['secret', 'keep']}, ['secret'], False),
+        ({'json': []}, {'json': ['secret']}, ['secret'], False),
+        (
+            {'data': b'body'},
+            {'data': b'body', 'headers': {'Content-Type': 'text/plain'}},
+            ['Content-Type'],
+            False,
+        ),
+        ({}, {'headers': {'Content-Type': 'text/plain'}}, ['Content-Type'], True),
+        (
+            {'headers': {'Authorization': 'fixture'}},
+            {'headers': {'Authorization': 'fixture'}},
+            ['Authorization'],
+            True,
+        ),
+        (
+            {},
+            {'data': 'x=', 'headers': {'Content-Type': 'application/x-www-form-urlencoded'}},
+            ['Authorization'],
+            False,
+        ),
+    ],
+)
+def test_vary_cookie__redirect_final_identity(current, final, ignored, expected):
+    """Redacted identity cannot validate an alias, even after ignore settings change."""
+
+    def prepare(kwargs):
+        kwargs = kwargs.copy()
+        headers = {'Cookie': 'theme=dark', **kwargs.pop('headers', {})}
+        return Request(
+            kwargs.pop('method', 'GET'), 'https://example.com/final', headers=headers, **kwargs
+        ).prepare()
+
+    request = prepare(current)
+    final_request = prepare(final)
+    stored = CachedResponse(
+        status_code=200,
+        headers={'Vary': 'Cookie'},
+        content=b'REDACTED',
+        request=CachedRequest.from_request(final_request),
+        history=[
+            CachedResponse(
+                status_code=303, request=CachedRequest(url='https://example.com/REDACTED')
+            )
+        ],
+    )
+    redact_response(stored, ignored)
+    actions = CacheActions.from_request(
+        'fixture-key',
+        request,
+        CacheSettings(
+            allowable_methods=('GET', 'POST'), only_if_cached=True, ignored_parameters=[]
+        ),
+    )
+
+    actions.update_from_cached_response(stored, lambda *_args, **_kwargs: 'constant-key')
+
+    assert actions.error_504 is not expected
+    assert not actions.send_request
+    assert not actions.resend_request
+    assert final_request.headers['Cookie'] == 'theme=dark'
+
+
+def test_vary_cookie__redirect_stream_is_not_consumed():
+    body = BytesIO(b'fixture body')
+    body.seek(8)
+    request = Request(
+        'GET', 'https://example.com/', data=body, headers={'Cookie': 'theme=dark'}
+    ).prepare()
+    response = CachedResponse(
+        headers={'Vary': 'Cookie'},
+        request=CachedRequest(method='GET', url=request.url, body=b'body', headers=request.headers),
+        history=[CachedResponse(status_code=302)],
+    )
+    actions = CacheActions.from_request('fixture-key', request, CacheSettings())
+    with patch('requests_cache.policy.actions.normalize_request') as normalise:
+        assert not actions._validate_vary(response, lambda *_args, **_kwargs: 'constant-key')
+        normalise.assert_not_called()
+    assert body.tell() == 8
+
+
 def test_update_from_cached_response__vary_cookie_and_headers():
     cached_cookiejar = RequestsCookieJar()
     cached_cookiejar.set('session', 'abc123')
@@ -460,11 +607,13 @@ def test_update_from_cached_response__vary_cookie_and_headers():
     new_cookiejar.set('session', 'abc123')
 
     # Cached response with Vary: Cookie, Accept
-    cached_request = CachedRequest(
-        method='GET',
-        url='https://site.com/page',
-        headers={'Accept': 'application/json'},
-        cookies=cached_cookiejar,
+    cached_request = CachedRequest.from_request(
+        Request(
+            'GET',
+            'https://site.com/page',
+            headers={'Accept': 'application/json'},
+            cookies=cached_cookiejar,
+        ).prepare()
     )
     cached_response = CachedResponse(
         headers={'Vary': 'Cookie, Accept'},
@@ -487,6 +636,81 @@ def test_update_from_cached_response__vary_cookie_and_headers():
     assert actions.send_request is True
     # Cookies match, so secondary key is set for the differing Accept header
     assert actions.vary_cache_key is not None
+
+
+@pytest.mark.parametrize(
+    'cached_pairs, current_pairs, expected_match',
+    [
+        ([('theme', 'light'), ('colour', 'blue')], [('colour', 'blue'), ('theme', 'light')], True),
+        ([('a', 'b; c=d')], [('a', 'b'), ('c', 'd')], False),
+        ([('theme', 'light'), ('theme', 'light')], [('theme', 'light')], False),
+        ([], [], True),
+    ],
+)
+def test_update_from_cached_response__vary_headerless_cookie_jars(
+    cached_pairs, current_pairs, expected_match
+):
+    requests = []
+    for pairs in (cached_pairs, current_pairs):
+        jar = RequestsCookieJar()
+        for index, (name, value) in enumerate(pairs):
+            jar.set(name, value, path=f'/{index}')
+        request = Request('GET', 'https://site.com/page', cookies=jar).prepare()
+        request.headers.pop('Cookie', None)
+        requests.append(request)
+    cached_response = CachedResponse(
+        headers={'Vary': 'Cookie'}, request=CachedRequest.from_request(requests[0])
+    )
+
+    actions = CacheActions.from_request('key', requests[1])
+    actions.update_from_cached_response(cached_response, create_key=create_key)
+
+    assert actions.send_request is not expected_match
+
+
+def test_update_from_cached_response__ignored_headerless_cookie_jars():
+    request = Request('GET', 'https://site.com/page').prepare()
+    cached_request = CachedRequest.from_request(request)
+    cached_request.cookies.set('theme', 'light')
+    cached_response = CachedResponse(headers={'Vary': 'Cookie, Cookie'}, request=cached_request)
+    actions = CacheActions.from_request(
+        'key', request, settings=CacheSettings(ignored_parameters=['Cookie'])
+    )
+
+    with patch.object(RequestsCookieJar, 'items', side_effect=AssertionError('Jar was inspected')):
+        actions.update_from_cached_response(cached_response, create_key=create_key)
+
+    assert actions.send_request is False
+
+
+@pytest.mark.parametrize('scope', ['domain', 'path'])
+@pytest.mark.parametrize('change_sent_cookie', [True, False])
+def test_update_from_cached_response__vary_cookie_scope(scope, change_sent_cookie):
+    requests = []
+    for current in (False, True):
+        jar = RequestsCookieJar()
+        sent_value = 'dark' if current and change_sent_cookie else 'light'
+        unsent_value = (
+            'light' if current and change_sent_cookie else ('blue' if current else 'dark')
+        )
+        jar.set('theme', sent_value, domain='site.com', path='/')
+        jar.set(
+            'theme',
+            unsent_value,
+            domain='other.com' if scope == 'domain' else 'site.com',
+            path='/elsewhere' if scope == 'path' else '/',
+        )
+        requests.append(Request('GET', 'https://site.com/page', cookies=jar).prepare())
+    cached_response = CachedResponse(
+        headers={'Vary': 'Cookie'}, request=CachedRequest.from_request(requests[0])
+    )
+
+    actions = CacheActions.from_request('key', requests[1])
+    actions.update_from_cached_response(cached_response, create_key=create_key)
+
+    assert requests[0].headers['Cookie'] == 'theme=light'
+    assert requests[1].headers['Cookie'] == ('theme=dark' if change_sent_cookie else 'theme=light')
+    assert actions.send_request is change_sent_cookie
 
 
 @pytest.mark.parametrize('max_stale, usable', [(5, False), (15, True)])

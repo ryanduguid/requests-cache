@@ -5,7 +5,9 @@
    :nosignatures:
 """
 
-from contextlib import contextmanager
+import stat
+import sys
+from contextlib import closing, contextmanager
 from logging import getLogger
 from os import makedirs
 from pathlib import Path
@@ -59,7 +61,11 @@ class FileCache(BaseCache):
         super().__init__(cache_name=str(cache_name), **kwargs)
         skwargs = {'serializer': serializer, **kwargs} if serializer else kwargs
         self.responses: FileDict = (LRUFileDict if 'max_cache_bytes' in kwargs else FileDict)(
-            cache_name, use_temp=use_temp, decode_content=decode_content, **skwargs
+            cache_name,
+            use_temp=use_temp,
+            decode_content=decode_content,
+            _metadata_files=('redirects.sqlite',),
+            **skwargs,
         )
         with self.lock:
             self.redirects: SQLiteDict = SQLiteDict(
@@ -82,11 +88,10 @@ class FileCache(BaseCache):
 
     def clear(self):
         """Clear the cache"""
-        # FileDict.clear() removes the cache directory, including redirects.sqlite
         with self.lock:
             self.redirects.close()
             self.responses.clear()
-            self.redirects.init_db()
+            self.redirects.clear()
 
     def delete(self, *args, **kwargs):
         with self.lock:
@@ -109,11 +114,15 @@ class FileDict(BaseStorage):
         lock: Optional[RLock] = None,
         **kwargs,
     ):
+        metadata_files = kwargs.pop('_metadata_files', ())
         super().__init__(serializer=serializer, **kwargs)
         self.cache_dir = get_cache_path(cache_name, use_cache_dir=use_cache_dir, use_temp=use_temp)
         self.extension = _get_extension(extension, self.serializer)
         self.is_binary = getattr(self.serializer, 'is_binary', False)
         self._lock = lock if lock is not None else RLock()
+        self._metadata_paths: set[Path] = set()
+        for name in metadata_files:
+            self._register_metadata(self.cache_dir / name)
         makedirs(self.cache_dir, exist_ok=True)
 
     @property
@@ -160,10 +169,36 @@ class FileDict(BaseStorage):
         return sum(1 for _ in self.paths())
 
     def clear(self) -> None:
-        """Empty the cache directory."""
-        with self._try_io(ignore_errors=True):
-            rmtree(self.cache_dir, ignore_errors=True)
-            self.cache_dir.mkdir()
+        """Remove cached files while preserving shared metadata databases."""
+        with self._lock:
+            with self._try_io(ignore_errors=True):
+                root_is_junction = False
+                if sys.platform == 'win32':
+                    root_is_junction = (
+                        self.cache_dir.lstat().st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+                    )
+                if (
+                    self._metadata_paths
+                    and not self.cache_dir.is_symlink()
+                    and not root_is_junction
+                ):
+                    for path in self.cache_dir.iterdir():
+                        if path in self._metadata_paths:
+                            continue
+                        with self._try_io(ignore_errors=True):
+                            if path.is_symlink() or not path.is_dir():
+                                path.unlink()
+                            else:
+                                rmtree(path, ignore_errors=True)
+                else:
+                    rmtree(self.cache_dir, ignore_errors=True)
+            with self._try_io(ignore_errors=True):
+                self.cache_dir.mkdir(exist_ok=True)
+
+    def _register_metadata(self, path: StrOrPath) -> None:
+        self._metadata_paths.update(
+            Path(f'{path}{suffix}') for suffix in ('', '-wal', '-shm', '-journal')
+        )
 
     def keys(self):
         return [path.stem for path in self.paths()]
@@ -171,7 +206,11 @@ class FileDict(BaseStorage):
     def paths(self) -> Iterator[Path]:
         """Get absolute file paths to all cached responses"""
         with self._lock:
-            return self.cache_dir.glob(f'*{self.extension}')
+            return (
+                path
+                for path in self.cache_dir.glob(f'*{self.extension}')
+                if path not in self._metadata_paths
+            )
 
     def size(self) -> int:
         """Return the size of the database, in bytes"""
@@ -215,6 +254,7 @@ class LRUFileDict(FileDict):
             raise ValueError(f'block_bytes must be greater than 0, not {block_bytes}')
 
         self.lru_index = LRUDict(self.cache_dir / 'lru.db', 'lru', **kwargs)
+        self._register_metadata(self.lru_index.db_path)
         # Rebuild LRU index if explicitly asked,
         # or for a new cache (potentially with existing files but no metadata)
         if sync_index or len(self.lru_index) == 0:
@@ -306,9 +346,11 @@ class LRUFileDict(FileDict):
 
     def clear(self):
         """Clear the cache directory and LRU index."""
-        super().clear()
-        self.lru_index.clear()
-        self._lru_initialized = False
+        with self._lock, self.lru_index._lock:
+            self.lru_index.close()
+            super().clear()
+            self.lru_index.clear()
+            self._lru_initialized = False
 
     def size(self) -> int:
         """Return the size of the database, in bytes"""
@@ -358,7 +400,14 @@ class LRUDict(SQLiteDict):
                 '    total_size INTEGER NOT NULL'
                 ')'
             )
-            con.execute(f'INSERT OR IGNORE INTO {self.table_name}_size (total_size) VALUES (0)')
+            con.execute(
+                f'DELETE FROM {self.table_name}_size '
+                f'WHERE rowid != (SELECT MIN(rowid) FROM {self.table_name}_size)'
+            )
+            con.execute(
+                f'INSERT INTO {self.table_name}_size (total_size) '
+                f'SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM {self.table_name}_size)'
+            )
 
             # Triggers to update total size
             con.execute(
@@ -400,10 +449,13 @@ class LRUDict(SQLiteDict):
             raise KeyError
 
     def __getitem__(self, key) -> int:
-        with self.connection() as con:
-            # Using placeholders here with python 3.12+ and concurrency results in the error:
-            # sqlite3.InterfaceError: bad parameter or other API misuse
-            row = con.execute(f"SELECT size FROM {self.table_name} WHERE key='{key}'").fetchone()
+        with (
+            self.connection() as con,
+            closing(
+                con.execute(f'SELECT size FROM {self.table_name} WHERE key=?', (key,))
+            ) as cursor,
+        ):
+            row = cursor.fetchone()
             if not row:
                 raise KeyError(key)
             return row[0]
@@ -439,11 +491,14 @@ class LRUDict(SQLiteDict):
             cur = con.execute(
                 f"""
                 WITH ordered AS (
-                    SELECT key, size, access_time, SUM(size) OVER (ORDER BY access_time) AS running_total
+                    SELECT key, size, access_time,
+                        SUM(size) OVER (
+                            ORDER BY access_time, key ROWS UNBOUNDED PRECEDING
+                        ) AS running_total
                     FROM {self.table_name}
                 )
                 SELECT * FROM ordered WHERE running_total - size < ?
-                ORDER BY access_time;
+                ORDER BY access_time, key;
                 """,
                 (total_size,),
             )
@@ -463,13 +518,20 @@ class LRUDict(SQLiteDict):
         if key not in ['access_time', 'size', 'key']:
             raise ValueError(f'Invalid sort key: {key}')
         direction = 'DESC' if reversed else 'ASC'
-        limit_expr = f'LIMIT {limit}' if limit else ''
+        limit_expr = 'LIMIT ?' if limit is not None else ''
+        params = (limit,) if limit is not None else ()
 
-        with self.connection() as con:
-            for row in con.execute(
-                f'SELECT key FROM {self.table_name} ORDER BY {key} {direction} {limit_expr}',
-            ):
-                yield row[0]
+        with (
+            self.connection() as con,
+            closing(
+                con.execute(
+                    f'SELECT key FROM {self.table_name} ORDER BY {key} {direction} {limit_expr}',
+                    params,
+                )
+            ) as cursor,
+        ):
+            keys = [row[0] for row in cursor]
+        yield from keys
 
     def total_size(self) -> int:
         with self.connection() as con:
