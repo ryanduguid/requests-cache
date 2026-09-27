@@ -1,4 +1,5 @@
 from logging import getLogger
+from typing import List, Optional, Union
 from urllib.parse import urlsplit
 
 from attrs import asdict, define, field, fields_dict
@@ -23,12 +24,19 @@ class CachedRequest(RichMixin):
     headers: CaseInsensitiveDict = field(factory=CaseInsensitiveDict)
     method: str = field(default=None)
     url: str = field(default=None)
+    # None denotes legacy data whose redaction history is unknown.
+    redacted_fields: Optional[List[str]] = field(default=None)
 
     @classmethod
-    def from_request(cls, original_request: PreparedRequest) -> 'CachedRequest':
+    def from_request(
+        cls, original_request: Union[PreparedRequest, 'CachedRequest']
+    ) -> 'CachedRequest':
         """Create a CachedRequest based on an original request object"""
         kwargs = {k: getattr(original_request, k, None) for k in fields_dict(cls).keys()}
         kwargs['cookies'] = getattr(original_request, '_cookies', None)
+        kwargs['redacted_fields'] = getattr(
+            original_request, 'redacted_fields', None if isinstance(original_request, cls) else []
+        )
         return cls(**kwargs)  # type: ignore  # False positive in mypy 0.920+?
 
     @property
@@ -54,6 +62,7 @@ class CachedRequest(RichMixin):
             method=self.method,
             url=self.url,
         )
+        prepared_request.redacted_fields = self.redacted_fields  # type: ignore[attr-defined]
         return prepared_request
 
     @property

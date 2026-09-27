@@ -84,6 +84,8 @@ class CachedResponse(RichMixin, BaseResponse):
     request: CachedRequest = field(factory=CachedRequest)  # type: ignore
     status_code: int = field(default=0)
     url: str = field(default=None)
+    # None denotes legacy data whose redaction history is unknown.
+    redacted_fields: Optional[List[str]] = field(default=None)
 
     def __attrs_post_init__(self):
         # Not using created_at field default due to possible bug on Windows with omit_if_default
@@ -101,6 +103,7 @@ class CachedResponse(RichMixin, BaseResponse):
             obj._convert_redirects()
             return obj
 
+        kwargs.setdefault('redacted_fields', [])
         obj = cls(**kwargs)
 
         # Copy basic attributes

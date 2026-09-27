@@ -26,7 +26,7 @@ from . import (
 from .settings import CacheSettings
 
 if TYPE_CHECKING:
-    from ..models import CachedRequest, CachedResponse
+    from ..models import AnyPreparedRequest, CachedRequest, CachedResponse
 
 # Nonstandard headers that can be used to override the request method
 METHOD_OVERRIDE_HEADERS = [
@@ -340,10 +340,13 @@ class CacheActions(RichMixin):
     ) -> bool:
         """If the cached response contains Vary, check that the specified request headers match"""
         vary = cached_response.headers.get('Vary')
+        redacted = getattr(cached_response, 'redacted_fields', None)
+        if (redacted is None and vary == 'REDACTED') or (
+            redacted is not None and 'header:vary' in redacted
+        ):
+            return False
         if not vary:
             return True
-        elif vary == 'REDACTED':
-            return False
 
         # Generate a secondary cache key for the headers nominated by Vary.
         # Cookie checks use the final request, whose header includes redirect updates.
@@ -400,7 +403,10 @@ class CacheActions(RichMixin):
                 f'Failed Vary check: Vary header(s) are in ignored_parameters: {ignore_overlap}'
             )
             return False
-        return all(cached_headers.get(h) != 'REDACTED' for h in match_headers)
+        redacted = getattr(cached_request, 'redacted_fields', None)
+        if redacted is None:
+            return all(cached_headers.get(h) != 'REDACTED' for h in match_headers)
+        return not any(f'header:{h}' in redacted for h in match_headers)
 
     def _matches_final_request(self, cached_request: 'CachedRequest') -> bool:
         """Only reuse a redirected response when the available final identity matches."""
@@ -428,26 +434,13 @@ class CacheActions(RichMixin):
             )
         except (TypeError, ValueError):
             return False
-        cached_body = encode(cached.body)
-        if (
-            'REDACTED' in (cached.url or '')
-            or b'REDACTED' in encode(cached_request.body)
-            or b'REDACTED' in cached_body
-        ):
-            return False
-        content_type = decode(cached.headers.get('Content-Type', ''), encoding='latin-1')
-        if cached_body and content_type == 'REDACTED':
-            return False
-        # ponytail: Arrays may lose values under an earlier root setting; reuse needs provenance.
-        if is_json_content_type(
-            content_type.split(';', 1)[0].lower()
-        ) and _has_ambiguous_json_array(cached_body):
+        if not _has_complete_identity(cached_request, cached):
             return False
 
         return (current.method, current.url, encode(current.body)) == (
             cached.method,
             cached.url,
-            cached_body,
+            encode(cached.body),
         )
 
     def _cookies_match(self, cached_request: 'CachedRequest') -> bool:
@@ -504,6 +497,31 @@ def _log_vary_diff(
     headers_2 = normalize_headers(headers_2)
     nonmatching = [k for k in vary if headers_1.get(k) != headers_2.get(k)]
     logger.debug(f'Failed Vary check. Non-matching headers: {", ".join(nonmatching)}')
+
+
+def _has_complete_identity(original: 'CachedRequest', normalised: 'AnyPreparedRequest') -> bool:
+    """Use recorded data loss where available, and conservative checks for legacy entries."""
+    redacted = getattr(original, 'redacted_fields', None)
+    if redacted is not None:
+        return not (
+            {'url', 'body'} & set(redacted) or (original.body and 'header:content-type' in redacted)
+        )
+    body = encode(normalised.body)
+    if (
+        'REDACTED' in (normalised.url or '')
+        or b'REDACTED' in encode(original.body)
+        or b'REDACTED' in body
+    ):
+        return False
+    content_type = decode(normalised.headers.get('Content-Type', ''), encoding='latin-1')
+    # Legacy arrays may have lost values under a different content_root_key setting.
+    return not (
+        (body and content_type == 'REDACTED')
+        or (
+            is_json_content_type(content_type.split(';', 1)[0].lower())
+            and _has_ambiguous_json_array(body)
+        )
+    )
 
 
 def _has_ambiguous_json_array(body: bytes) -> bool:

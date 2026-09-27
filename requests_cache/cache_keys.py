@@ -143,6 +143,12 @@ def normalize_request(
     else:
         norm_request = request.copy()
 
+    # This helper can discard values before storage. Only the storage redaction path records
+    # which fields lost information; preserve an unknown history for filtered helper results.
+    norm_request.redacted_fields = (  # type: ignore[union-attr]
+        None if ignored_parameters else getattr(request, 'redacted_fields', [])
+    )
+
     norm_request.method = (norm_request.method or '').upper()
     norm_request.url = normalize_url(norm_request.url or '', ignored_parameters)
     norm_request.body = normalize_body(norm_request, ignored_parameters, content_root_key)
@@ -271,15 +277,36 @@ def redact_response(
     if ignored_parameters:
         for cached_response in [response, *response.history]:
             cached_response.url = filter_url(cached_response.url, ignored_parameters)
-            cached_response.headers = normalize_headers(cached_response.headers, ignored_parameters)
+            _redact_headers(cached_response, ignored_parameters)
             for request in (cached_response.request, cached_response._next):
                 if request is None:
                     continue
-                request.url = filter_url(request.url, ignored_parameters)
-                request.body = normalize_body(request, ignored_parameters, content_root_key)
-                request.headers = normalize_headers(request.headers, ignored_parameters)
+                url = filter_url(request.url, ignored_parameters)
+                body = normalize_body(request, ignored_parameters, content_root_key)
+                if request.redacted_fields is not None:
+                    removed = set(request.redacted_fields)
+                    if url != request.url and url != filter_url(request.url, None):
+                        removed.add('url')
+                    # ponytail: Changed bodies may be parsed twice; return loss flags if write cost dominates.
+                    if body != encode(request.body) and body != normalize_body(
+                        request, None, content_root_key
+                    ):
+                        removed.add('body')
+                    request.redacted_fields = sorted(removed)
+                request.url, request.body = url, body
+                _redact_headers(request, ignored_parameters)
                 _redact_cookie_jar(request, ignored_parameters)
     return response
+
+
+def _redact_headers(obj, ignored_parameters: ParamList):
+    ignored = {name.lower() for name in ignored_parameters or []}
+    if obj.redacted_fields is not None:
+        obj.redacted_fields = sorted(
+            set(obj.redacted_fields)
+            | {f'header:{name.lower()}' for name in obj.headers if name.lower() in ignored}
+        )
+    obj.headers = normalize_headers(obj.headers, ignored_parameters)
 
 
 def _redact_cookie_jar(request: AnyPreparedRequest, ignored_parameters: ParamList):

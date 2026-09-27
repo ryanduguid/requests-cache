@@ -108,9 +108,11 @@ Use `match_headers=['Cookie']` to retain different Cookie variants separately.
 For responses with redirect history and `Vary: Cookie`, only a request matching the final method,
 normalised URL and body can reuse the cached response directly. Requests through other redirect
 aliases must follow the redirects again; cache-only requests return 504.
-The final identity must still be available. Redacted values, streamed bodies and JSON arrays cannot
-establish that match. This includes arrays in immediate object members, since a previous
-`content_root_key` setting may have removed ignored values without a redaction marker.
+The final identity must still be available. Stored requests record which fields lost values during
+redaction, so unchanged JSON arrays and literal `REDACTED` text can match. Requests with redacted
+identities or streamed bodies cannot establish that match. Older entries without this record still
+reject ambiguous arrays and redaction markers, since an earlier `content_root_key` setting may have
+removed values. Filtered results from `normalize_request()` also have an unknown redaction history.
 If a nominated value or the `Vary` field itself was redacted, the cached response cannot be reused.
 
 

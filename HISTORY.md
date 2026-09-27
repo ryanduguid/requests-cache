@@ -19,6 +19,7 @@
   Keep response body bytes when decoded JSON would lose precision, duplicate members or `null`,
   including numeric DynamoDB bodies and strings unsupported by built-in storage formats.
 * Match `Vary: Cookie` against the sent header and reject wildcard members and redacted comparisons.
+* Record redaction history so unchanged arrays and literal `REDACTED` values remain cacheable.
   Redact ignored request cookie jars and redirect snapshots without changing live requests.
   Redirect aliases must match the available final method, normalised URL and body before reuse.
 * Preserve byte-valued headers through JSON serialisers and request preparation, including
