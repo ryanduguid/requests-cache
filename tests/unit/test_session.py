@@ -1073,10 +1073,11 @@ def test_request_only_if_cached__secondary_variant(mock_session, expired_primary
         ),
     ],
 )
-def test_request_only_if_cached__vary_miss_preserves_filtered_entry(
-    mock_session, vary, first_kwargs, next_kwargs
+@pytest.mark.parametrize('only_if_cached', [False, True])
+def test_request__vary_miss_preserves_filtered_entry(
+    mock_session, vary, first_kwargs, next_kwargs, only_if_cached
 ):
-    """A synthetic 504 cannot evict a valid entry belonging to another variant."""
+    """A filtered response cannot evict an entry belonging to another variant."""
     mock_session.trust_env = False
     mock_session.settings.ignored_parameters = ['Authorization']
     mock_session.mock_adapter.register_uri(
@@ -1084,14 +1085,41 @@ def test_request_only_if_cached__vary_miss_preserves_filtered_entry(
     )
     first = mock_session.get(MOCKED_URL, **first_kwargs)
     mock_session.settings.filter_fn = lambda response: response.status_code == 200
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, status_code=403)
 
-    response = mock_session.get(MOCKED_URL, only_if_cached=True, **next_kwargs)
+    response = mock_session.get(MOCKED_URL, only_if_cached=only_if_cached, **next_kwargs)
 
-    assert response.status_code == 504
-    assert mock_session.mock_adapter.call_count == 1
+    assert response.status_code == (504 if only_if_cached else 403)
+    assert mock_session.mock_adapter.call_count == (1 if only_if_cached else 2)
     saved = mock_session.cache.get_response(first.cache_key)
     assert saved is not None
     assert saved.text == 'first variant'
+
+
+@pytest.mark.parametrize('variant', ['plain', 'primary', 'secondary'])
+@pytest.mark.parametrize('expired', [False, True])
+def test_request_only_if_cached__filters_matching_entry(mock_session, variant, expired):
+    """Read-time filtering still deletes matching entries, including expired ones."""
+    mock_session.trust_env = False
+    headers = {} if variant == 'plain' else {'Vary': 'Accept-Language'}
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers=headers)
+    primary = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'})
+    language = 'fr' if variant == 'secondary' else 'en'
+    cached = mock_session.get(MOCKED_URL, headers={'Accept-Language': language})
+    if expired:
+        mock_session.cache.save_response(cached, cached.cache_key, utcnow() - timedelta(seconds=1))
+    calls_before = mock_session.mock_adapter.call_count
+    mock_session.settings.filter_fn = lambda response: False
+
+    response = mock_session.get(
+        MOCKED_URL, headers={'Accept-Language': language}, only_if_cached=True
+    )
+
+    assert response.status_code == (504 if expired else 200)
+    assert mock_session.mock_adapter.call_count == calls_before
+    assert mock_session.cache.get_response(cached.cache_key) is None
+    if variant == 'secondary':
+        assert mock_session.cache.get_response(primary.cache_key) is not None
 
 
 @pytest.mark.parametrize('secondary_state', ['expired', 'wildcard'])

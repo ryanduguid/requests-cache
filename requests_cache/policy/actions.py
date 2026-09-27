@@ -56,6 +56,7 @@ class CacheActions(RichMixin):
         resend_async: Return a stale cache item, and send a non-blocking request to refresh it
         skip_read: Skip reading from the cache
         skip_write: Skip writing to the cache
+        vary_mismatch: The cached response belongs to a different request variant
     """
 
     # Outputs
@@ -68,6 +69,7 @@ class CacheActions(RichMixin):
     skip_read: bool = field(default=False)
     skip_write: bool = field(default=False)
     vary_cache_key: Optional[str] = field(default=None)
+    vary_mismatch: bool = field(default=False)
 
     # Inputs
     _directives: CacheDirectives = field(default=None, repr=False)
@@ -198,11 +200,13 @@ class CacheActions(RichMixin):
             key_kwargs: Additional keyword arguments for ``create_key``.
         """
         # A Vary mismatch is a cache miss, regardless of freshness.
+        self.vary_mismatch = False
         if (
             cached_response is not None
             and create_key
             and not self._validate_vary(cached_response, create_key, **key_kwargs)
         ):
+            self.vary_mismatch = True
             cached_response = None
 
         usable_response = self.is_usable(cached_response)

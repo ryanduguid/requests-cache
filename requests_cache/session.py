@@ -256,9 +256,9 @@ class CacheMixin(MIXIN_BASE):
         else:
             response = cached_response  # type: ignore  # Guaranteed to be non-None by this point
 
-        # If the request has been filtered out and was previously cached, delete it
+        # Delete filtered entries only when they belong to this request variant.
         if (
-            not actions.error_504
+            not actions.vary_mismatch
             and self.settings.filter_fn is not None
             and not self.settings.filter_fn(response)
         ):
