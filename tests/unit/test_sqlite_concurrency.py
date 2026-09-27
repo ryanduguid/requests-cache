@@ -3,6 +3,7 @@
 import pickle
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from threading import Barrier, Event
 
 import pytest
@@ -493,5 +494,55 @@ def test_encoding_failure_restores_text_factory(tmp_path):
         with cache.connection() as connection:
             assert connection.text_factory is factory
         assert cache['key'] == 'fixture'
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize(
+    'settings', [{'busy_timeout': 30}, {'wal': True}, {'wal': True, 'fast_save': True}]
+)
+def test_connection_setup_closes_pragma_cursors_without_garbage_collection(tmp_path, settings):
+    class RetainingConnection(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.pragma_cursors = []
+
+        def execute(self, sql, *args):
+            cursor = super().execute(sql, *args)
+            if sql.startswith('PRAGMA'):
+                self.pragma_cursors.append(cursor)
+            return cursor
+
+    cache = SQLiteDict(tmp_path / 'pragma.sqlite', factory=RetainingConnection, **settings)
+    try:
+        cache['key'] = 'fixture'
+        assert cache['key'] == 'fixture'
+        with cache.connection() as connection:
+            assert connection.pragma_cursors
+            for cursor in connection.pragma_cursors:
+                with pytest.raises(sqlite3.ProgrammingError, match='closed cursor'):
+                    cursor.fetchone()
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize('encoding', ['UTF-8', 'UTF-16le', 'UTF-16be'])
+@pytest.mark.parametrize('factory', ['buffer', 'uppercase'])
+def test_sorted_keeps_raw_lookup_columns_outside_row_factory(tmp_path, encoding, factory):
+    path = tmp_path / 'row-factory.sqlite'
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(f"PRAGMA encoding='{encoding}'").close()
+    kwargs = {'serializer': None} if factory == 'uppercase' else {}
+    cache = SQLiteDict(path, **kwargs)
+    try:
+        cache['key'] = b'fixture' if factory == 'uppercase' else 'fixture'
+        convert = bytes.upper if factory == 'uppercase' else memoryview
+        with cache.connection() as connection:
+            connection.row_factory = lambda cursor, row: tuple(
+                convert(value) if isinstance(value, bytes) else value for value in row
+            )
+        expected = b'FIXTURE' if factory == 'uppercase' else 'fixture'
+        assert cache['key'] == expected
+        assert list(cache.sorted()) == [expected]
     finally:
         cache.close()

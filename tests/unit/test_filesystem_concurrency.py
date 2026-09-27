@@ -1,5 +1,7 @@
 """Keep filesystem metadata compatible with SQLite connection ownership."""
 
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from sqlite3 import ProgrammingError
@@ -190,6 +192,28 @@ def test_metadata_clear_does_not_follow_directory_links(tmp_path, root_link):
     cache.clear()
     assert sentinel.read_text() == 'fixture'
     assert link.is_symlink() is root_link
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Directory junctions require Windows')
+def test_metadata_clear_does_not_traverse_root_junction(tmp_path):
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    sentinel = outside / 'sentinel'
+    sentinel.write_text('fixture')
+    root = tmp_path / 'cache junction'
+    subprocess.run(
+        ['cmd.exe', '/d', '/c', 'mklink', '/J', str(root), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    cache = FileCache(root)
+    try:
+        assert cache.cache_dir == root
+        assert not root.is_symlink()
+        cache.clear()
+        assert sentinel.read_text() == 'fixture'
+    finally:
+        cache.redirects.close()
 
 
 def test_paused_lru_iteration_releases_connection_lock(tmp_path):

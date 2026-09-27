@@ -14,7 +14,7 @@ from os.path import getsize, isfile
 from pathlib import Path
 from tempfile import gettempdir
 from time import time
-from typing import Collection, Iterator, List, Optional, Tuple, Type
+from typing import Collection, Iterator, List, Optional, Sequence, Tuple, Type, cast
 
 from platformdirs import user_cache_dir
 
@@ -258,14 +258,14 @@ class SQLiteDict(BaseStorage):
                 )
                 # Note: DBAPI doesn't support integer placeholders
                 if self.busy_timeout is not None:
-                    self._connection.execute(f'PRAGMA busy_timeout={self.busy_timeout}')
+                    self._connection.execute(f'PRAGMA busy_timeout={self.busy_timeout}').close()
                 if self.fast_save:
-                    self._connection.execute('PRAGMA synchronous=OFF')
+                    self._connection.execute('PRAGMA synchronous=OFF').close()
                 if self.wal:
-                    self._connection.execute('PRAGMA journal_mode=WAL')
+                    self._connection.execute('PRAGMA journal_mode=WAL').close()
                 # In WAL mode, default to normal sync mode (best balance between safety/performance)
                 if self.wal and not self.fast_save:
-                    self._connection.execute('PRAGMA synchronous=NORMAL')
+                    self._connection.execute('PRAGMA synchronous=NORMAL').close()
 
             # The connection's statement cache and transaction state also need protection on reads.
             if commit and not self._active_transaction:
@@ -477,12 +477,19 @@ class SQLiteDict(BaseStorage):
                 )
             ) as cursor,
         ):
+            row_factory = cursor.row_factory
+            if row_factory is not None:
+                cursor.row_factory = lambda cur, row: (
+                    cast(Sequence, row_factory(cur, row))[0],
+                    row[1],
+                    row[2],
+                )
             keys = cursor.fetchall()
             with closing(con.cursor()) as encoding_cursor:
                 encoding_cursor.row_factory = None
                 text_factory = con.text_factory
                 try:
-                    con.text_factory = str
+                    con.text_factory = lambda raw: raw.decode('ascii')
                     encoding = encoding_cursor.execute('PRAGMA encoding').fetchone()[0]
                 finally:
                     con.text_factory = text_factory

@@ -7,10 +7,11 @@
 
 from contextlib import closing, contextmanager
 from logging import getLogger
-from os import makedirs
+from os import makedirs, name as os_name
 from pathlib import Path
 from pickle import PickleError
 from shutil import rmtree
+from stat import IO_REPARSE_TAG_MOUNT_POINT
 from threading import RLock
 from time import time_ns
 from typing import Any, Iterator, Optional
@@ -170,7 +171,15 @@ class FileDict(BaseStorage):
         """Remove cached files while preserving shared metadata databases."""
         with self._lock:
             with self._try_io(ignore_errors=True):
-                if self._metadata_paths and not self.cache_dir.is_symlink():
+                root_is_junction = (
+                    os_name == 'nt'
+                    and self.cache_dir.lstat().st_reparse_tag == IO_REPARSE_TAG_MOUNT_POINT
+                )
+                if (
+                    self._metadata_paths
+                    and not self.cache_dir.is_symlink()
+                    and not root_is_junction
+                ):
                     for path in self.cache_dir.iterdir():
                         if path in self._metadata_paths:
                             continue

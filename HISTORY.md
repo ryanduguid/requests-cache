@@ -6,6 +6,7 @@
   Roll back failed transactions, report their errors and reject transaction-breaking lifecycle calls.
   Bind lookup keys and treat truncated pickles as invalid cache entries.
   Preserve shared filesystem metadata files when clearing caches and reset redirect entries.
+  Avoid traversing root directory links and junctions when clearing cached files.
   Exclude metadata from response paths, keep one LRU size counter and release iterator cursors.
   Preserve database key identity with UTF-16 and custom factories; evict enough entries when timestamps tie.
 * Preserve query and form values, empty fields and percent-encoded bytes during normalisation.
