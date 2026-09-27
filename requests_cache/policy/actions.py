@@ -7,7 +7,7 @@ from attrs import define, field
 from requests import PreparedRequest, Response
 from requests.structures import CaseInsensitiveDict
 
-from .._utils import coalesce
+from .._utils import coalesce, decode
 from ..cache_keys import normalize_headers
 from ..models import RichMixin
 from . import (
@@ -403,8 +403,14 @@ class CacheActions(RichMixin):
         """Compare sent Cookie headers, retaining jar checks only for two headerless requests."""
         cached_headers = CaseInsensitiveDict(cached_request.headers or {})
         current_headers = CaseInsensitiveDict(self._request.headers or {})
-        cached_field = ('Cookie' in cached_headers, cached_headers.get('Cookie'))
-        current_field = ('Cookie' in current_headers, current_headers.get('Cookie'))
+        cached_field = (
+            'Cookie' in cached_headers,
+            decode(cached_headers.get('Cookie'), encoding='latin-1'),
+        )
+        current_field = (
+            'Cookie' in current_headers,
+            decode(current_headers.get('Cookie'), encoding='latin-1'),
+        )
         if cached_field[0] or current_field[0]:
             return cached_field == current_field
         if 'cookie' in {h.lower() for h in (self._settings.ignored_parameters or [])}:

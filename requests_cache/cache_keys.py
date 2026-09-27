@@ -150,10 +150,10 @@ def normalize_headers(
     headers: MutableMapping[str, str],
     ignored_parameters: ParamList = None,
 ) -> CaseInsensitiveDict:
-    """Redact header names without changing the case or order of their values."""
+    """Redact ignored values and decode byte headers so they round-trip through Requests unchanged."""
     ignored_headers = {name.lower() for name in ignored_parameters or []}
     return CaseInsensitiveDict(
-        (name, 'REDACTED' if name.lower() in ignored_headers else decode(value))
+        (name, 'REDACTED' if name.lower() in ignored_headers else decode(value, encoding='latin-1'))
         for name, value in headers.items()
     )
 

@@ -411,6 +411,15 @@ def test_match_headers__vary_alternating(mock_session):
     [
         ({'headers': {'Cookie': 'theme=light'}}, {'headers': {'Cookie': 'theme=dark'}}, False),
         ({'headers': {'Cookie': 'theme=light'}}, {'headers': {'Cookie': 'theme=light'}}, True),
+        ({'headers': {'Cookie': b'theme=light'}}, {'headers': {'Cookie': b'theme=light'}}, True),
+        ({'headers': {'Cookie': b'theme=light'}}, {'headers': {'Cookie': 'theme=light'}}, True),
+        ({'headers': {'Cookie': b''}}, {'headers': {'Cookie': b''}}, True),
+        (
+            {'headers': {'Cookie': b'theme=\xc3\xa9'}},
+            {'headers': {'Cookie': 'theme=\u00e9'}},
+            False,
+        ),
+        ({'headers': {'Cookie': 'theme=\u00e9'}}, {'headers': {'Cookie': b'theme=\xe9'}}, True),
         ({'headers': {'Cookie': 'theme=light'}}, {}, False),
         ({}, {'headers': {'Cookie': 'theme=light'}}, False),
         ({'headers': {'Cookie': ''}}, {}, False),
@@ -460,6 +469,30 @@ def test_match_headers__vary_wildcard_member(mock_session, vary):
     response = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'}, only_if_cached=True)
 
     assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('match_headers', [False, ['X-Variant']])
+@pytest.mark.parametrize(
+    'first_value, next_value, expected_hit',
+    [
+        (b'\xc3\xa9', '\u00e9', False),
+        (b'\xe9', '\u00e9', True),
+        (b'\xc3\xa9', b'\xc3\xa9', True),
+    ],
+)
+def test_match_headers__vary_byte_values(
+    mock_session, match_headers, first_value, next_value, expected_hit
+):
+    """Primary and Vary keys must preserve the bytes sent in request headers."""
+    mock_session.trust_env = False
+    mock_session.settings.match_headers = match_headers
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': 'X-Variant'})
+    mock_session.get(MOCKED_URL, headers={'X-Variant': first_value})
+
+    response = mock_session.get(MOCKED_URL, headers={'X-Variant': next_value}, only_if_cached=True)
+
+    assert response.status_code == (200 if expected_hit else 504)
     assert mock_session.mock_adapter.call_count == 1
 
 

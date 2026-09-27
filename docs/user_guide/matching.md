@@ -87,6 +87,8 @@ isn't available:
 If you want to match _all_ request headers, you can use `match_headers=True`.
 Header names are case-insensitive. Header values retain their case, whitespace and order,
 because their meaning depends on the server and header field.
+Byte-valued headers use the same Latin-1 mapping as Requests. Clear older cache entries created
+with non-ASCII byte headers, since their original bytes cannot be recovered reliably.
 `Vary: Cookie` compares the exact sent header, including an explicit header that overrides a cookie jar.
 Use `match_headers=['Cookie']` to retain different Cookie variants separately.
 If a nominated value or the `Vary` field itself was redacted, the cached response cannot be reused.
