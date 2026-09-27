@@ -282,6 +282,35 @@ def test_current_request_must_retain_comparison_values(field, lost):
     assert not actions.send_request and not actions.resend_request
 
 
+@pytest.mark.parametrize('header', ['Cookie', 'X-Variant'])
+@pytest.mark.parametrize('value', ['REDACTED', b'REDACTED'])
+@pytest.mark.parametrize('redacted', [None, ['unknown'], ['unknown', 'header:x-unused'], []])
+@pytest.mark.parametrize('operand', ['current', 'cached'])
+def test_vary_marker_availability_uses_decoded_headers(header, value, redacted, operand):
+    url = 'https://example.com/final'
+    original = CachedRequest.from_request(Request('GET', url, headers={header: value}).prepare())
+    original.redacted_fields = redacted
+    intact = CachedRequest.from_request(Request('GET', url, headers={header: 'REDACTED'}).prepare())
+    current = (original if operand == 'current' else intact).prepare().copy().copy()
+    cached = original if operand == 'cached' else intact
+    assert create_key(current, match_headers=[header]) == create_key(cached, match_headers=[header])
+    response = CachedResponse(
+        url=url,
+        request=cached,
+        status_code=200,
+        headers={'Vary': header},
+        history=[CachedResponse(url=url, request=cached.copy(), status_code=307)],
+    )
+    actions = CacheActions.from_request(
+        create_key(current), current, CacheSettings(only_if_cached=True, ignored_parameters=[])
+    )
+
+    actions.update_from_cached_response(response, create_key)
+
+    assert actions.error_504 is (redacted is None or 'unknown' in redacted)
+    assert not actions.send_request and not actions.resend_request
+
+
 @pytest.mark.parametrize('serializer_name', ['json', 'ujson', 'orjson', 'pickle', 'yaml', 'bson'])
 @pytest.mark.parametrize('prepare_first', [False, True])
 def test_large_identity_after_normalising_before_storage(
@@ -356,12 +385,13 @@ def test_large_json_depth_limit_declines_an_ambiguous_identity(monkeypatch):
 
 
 @pytest.mark.parametrize('cutoff', [10, 1024])
-def test_legacy_json_parser_limit_is_a_cache_miss(monkeypatch, cutoff):
+@pytest.mark.parametrize('redacted', [None, ['unknown'], ['unknown', 'header:x-unused']])
+@pytest.mark.parametrize('operand', ['current', 'cached'])
+def test_legacy_json_parser_limit_is_a_cache_miss(monkeypatch, cutoff, redacted, operand):
     def exceed_depth(_value, **_kwargs):
         raise RecursionError('JSON nesting exceeds the parser limit')
 
     monkeypatch.setattr(cache_keys, 'MAX_NORM_BODY_SIZE', cutoff)
-    monkeypatch.setattr(json, 'loads', exceed_depth)
     current = Request(
         'POST',
         'https://example.com/',
@@ -369,7 +399,14 @@ def test_legacy_json_parser_limit_is_a_cache_miss(monkeypatch, cutoff):
         headers={'Content-Type': 'application/json', 'Cookie': 'fixture'},
     ).prepare()
     cached = CachedRequest.from_request(current)
-    cached.redacted_fields = None
+    legacy = cached.copy()
+    legacy.redacted_fields = redacted
+    if operand == 'current':
+        current = legacy.prepare().copy().copy()
+    else:
+        cached = legacy
+    key = create_key(current)
+    assert key == create_key(cached)
     response = CachedResponse(
         url=current.url,
         request=cached,
@@ -378,10 +415,11 @@ def test_legacy_json_parser_limit_is_a_cache_miss(monkeypatch, cutoff):
         history=[CachedResponse(url=current.url, request=cached.copy(), status_code=307)],
     )
     actions = CacheActions.from_request(
-        'fixture-key', current, CacheSettings(only_if_cached=True, ignored_parameters=[])
+        key, current, CacheSettings(only_if_cached=True, ignored_parameters=[])
     )
+    monkeypatch.setattr(json, 'loads', exceed_depth)
 
-    actions.update_from_cached_response(response, lambda *_args, **_kwargs: 'fixture-key')
+    actions.update_from_cached_response(response, create_key)
 
     assert actions.error_504
     assert not actions.send_request and not actions.resend_request

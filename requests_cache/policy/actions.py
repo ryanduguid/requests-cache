@@ -394,8 +394,8 @@ class CacheActions(RichMixin):
         self, cached_request: 'CachedRequest', match_headers: List[str]
     ) -> bool:
         """Reject comparisons whose nominated header values were or will be redacted."""
-        cached_headers = CaseInsensitiveDict(cached_request.headers or {})
-        current_headers = CaseInsensitiveDict(self._request.headers or {})
+        cached_headers = normalize_headers(cached_request.headers or {})
+        current_headers = normalize_headers(self._request.headers or {})
         ignored = {h.lower() for h in (self._settings.ignored_parameters or [])}
         ignore_overlap = ignored & set(match_headers)
         if any(h in cached_headers or h in current_headers for h in ignore_overlap):
