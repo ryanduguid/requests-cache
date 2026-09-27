@@ -252,7 +252,7 @@ class CacheMixin(MIXIN_BASE):
         elif actions.resend_request:
             response = self._resend(request, actions, cached_response, **kwargs)  # type: ignore
         elif actions.send_request:
-            response = self._send_and_cache(request, actions, cached_response, **kwargs)
+            response = self._send_and_cache(request, actions, **kwargs)
         else:
             response = cached_response  # type: ignore  # Guaranteed to be non-None by this point
 

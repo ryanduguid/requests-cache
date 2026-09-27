@@ -988,6 +988,236 @@ def test_request_only_if_cached__uncached(mock_session):
         response.raise_for_status()
 
 
+@pytest.mark.parametrize('cache_only_mode', ['keyword', 'header', 'settings'])
+@pytest.mark.parametrize(
+    'vary, first_kwargs, next_kwargs',
+    [
+        (
+            'Accept-Language',
+            {'headers': {'Accept-Language': 'en'}},
+            {'headers': {'Accept-Language': 'fr'}},
+        ),
+        ('*', {}, {}),
+        ('Cookie', {'cookies': {'theme': 'light'}}, {'cookies': {'theme': 'dark'}}),
+        (
+            'Authorization',
+            {'headers': {'Authorization': 'fabricated-a'}},
+            {'headers': {'Authorization': 'fabricated-b'}},
+        ),
+    ],
+)
+def test_request_only_if_cached__vary_miss(
+    mock_session, cache_only_mode, vary, first_kwargs, next_kwargs
+):
+    """An inapplicable cached variant cannot satisfy a cache-only request."""
+    mock_session.trust_env = False
+    mock_session.settings.ignored_parameters = ['Authorization']
+    mock_session.mock_adapter.register_uri(
+        'GET', MOCKED_URL, headers={'Vary': vary}, text='first variant'
+    )
+    mock_session.get(MOCKED_URL, **first_kwargs)
+    kwargs = dict(next_kwargs)
+    if cache_only_mode == 'keyword':
+        kwargs['only_if_cached'] = True
+    elif cache_only_mode == 'header':
+        kwargs['headers'] = {**kwargs.get('headers', {}), 'Cache-Control': 'only-if-cached'}
+    else:
+        mock_session.settings.only_if_cached = True
+
+    response = mock_session.get(MOCKED_URL, **kwargs)
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('expired_primary', [False, True])
+@pytest.mark.parametrize('read_only', [False, True])
+def test_request_only_if_cached__secondary_variant(mock_session, expired_primary, read_only):
+    """A matching secondary variant remains available even if the primary is stale."""
+    mock_session.trust_env = False
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        MOCKED_URL,
+        headers={'Vary': 'Accept-Language'},
+        text=lambda request, context: request.headers['Accept-Language'],
+    )
+    first = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'})
+    mock_session.get(MOCKED_URL, headers={'Accept-Language': 'fr'})
+    if expired_primary:
+        cached = mock_session.cache.get_response(first.cache_key)
+        mock_session.cache.save_response(cached, first.cache_key, utcnow() - timedelta(seconds=1))
+    mock_session.settings.read_only = read_only
+
+    response = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'fr'}, only_if_cached=True)
+
+    assert response.status_code == 200
+    assert response.from_cache is True
+    assert response.text == 'fr'
+    assert mock_session.cache.get_response(first.cache_key).text == 'en'
+    assert mock_session.mock_adapter.call_count == 2
+
+    missing = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'de'}, only_if_cached=True)
+    assert missing.status_code == 504
+    assert mock_session.mock_adapter.call_count == 2
+
+
+@pytest.mark.parametrize('secondary_state', ['expired', 'wildcard'])
+def test_request_only_if_cached__secondary_variant_rejected(mock_session, secondary_state):
+    mock_session.trust_env = False
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': 'Accept-Language'})
+    mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'})
+    if secondary_state == 'wildcard':
+        mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': '*'})
+    second = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'fr'})
+    if secondary_state == 'expired':
+        cached = mock_session.cache.get_response(second.cache_key)
+        mock_session.cache.save_response(cached, second.cache_key, utcnow() - timedelta(seconds=1))
+
+    response = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'fr'}, only_if_cached=True)
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 2
+
+
+@pytest.mark.parametrize(
+    'validator, value, conditional',
+    [
+        ('ETag', '"first-variant"', 'If-None-Match'),
+        ('Last-Modified', 'Wed, 21 Oct 2015 07:28:00 GMT', 'If-Modified-Since'),
+    ],
+)
+def test_vary_miss__does_not_reuse_validators(mock_session, validator, value, conditional):
+    """Validators belong to the matched representation, not another cached variant."""
+    mock_session.trust_env = False
+    mock_session.settings.always_revalidate = True
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        MOCKED_URL,
+        headers={'Vary': 'Accept-Language', validator: value},
+        text='first variant',
+    )
+    mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'})
+    mock_session.get(MOCKED_URL, headers={'Accept-Language': 'fr'})
+
+    assert conditional not in mock_session.mock_adapter.last_request.headers
+
+
+def test_vary_miss__does_not_reuse_unrelated_304_body(mock_session):
+    mock_session.trust_env = False
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        MOCKED_URL,
+        headers={'Vary': 'Accept-Language'},
+        text='first variant',
+    )
+    first = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'})
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, status_code=304)
+
+    response = mock_session.get(
+        MOCKED_URL,
+        headers={'Accept-Language': 'fr', 'If-None-Match': '"external-variant"'},
+    )
+
+    assert response.status_code == 304
+    assert response.from_cache is False
+    assert response.content == b''
+    assert mock_session.mock_adapter.last_request.headers['If-None-Match'] == '"external-variant"'
+    assert mock_session.cache.get_response(first.cache_key).text == 'first variant'
+
+
+def test_vary_miss__does_not_fall_back_to_unrelated_body(mock_session):
+    mock_session.trust_env = False
+    mock_session.settings.always_revalidate = True
+    mock_session.settings.stale_if_error = True
+    mock_session.mock_adapter.register_uri(
+        'GET',
+        MOCKED_URL,
+        headers={'Vary': 'Accept-Language', 'ETag': '"first-variant"'},
+        text='first variant',
+    )
+    mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'})
+    mock_session.mock_adapter.register_uri(
+        'GET', MOCKED_URL, exc=RequestException('fabricated outage')
+    )
+
+    with pytest.raises(RequestException, match='fabricated outage'):
+        mock_session.get(MOCKED_URL, headers={'Accept-Language': 'fr'})
+
+
+@pytest.mark.parametrize('stale_option', ['stale_if_error', 'stale_while_revalidate'])
+def test_request_only_if_cached__vary_miss_with_stale_allowance(mock_session, stale_option):
+    mock_session.trust_env = False
+    mock_session.mock_adapter.register_uri('GET', MOCKED_URL, headers={'Vary': 'Accept-Language'})
+    first = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'en'})
+    cached = mock_session.cache.get_response(first.cache_key)
+    mock_session.cache.save_response(cached, first.cache_key, utcnow() - timedelta(seconds=1))
+    setattr(mock_session.settings, stale_option, True)
+
+    with patch.object(mock_session, '_resend_async') as mock_resend:
+        response = mock_session.get(
+            MOCKED_URL, headers={'Accept-Language': 'fr'}, only_if_cached=True
+        )
+        mock_resend.assert_not_called()
+
+    assert response.status_code == 504
+    assert mock_session.mock_adapter.call_count == 1
+
+
+@pytest.mark.parametrize('read_only', [False, True])
+@pytest.mark.parametrize('outcome', ['304', '500', 'exception'])
+def test_secondary_variant__revalidation(mock_session, read_only, outcome):
+    """A matched stale variant retains its own validators, body and error fallback."""
+    mock_session.trust_env = False
+    for language in ('en', 'fr'):
+        mock_session.mock_adapter.register_uri(
+            'GET',
+            MOCKED_URL,
+            headers={'Vary': 'Accept-Language', 'ETag': f'"{language}"'},
+            text=language,
+        )
+        response = mock_session.get(MOCKED_URL, headers={'Accept-Language': language})
+    cached = mock_session.cache.get_response(response.cache_key)
+    mock_session.cache.save_response(cached, response.cache_key, utcnow() - timedelta(seconds=1))
+    mock_session.settings.read_only = read_only
+    mock_session.settings.stale_if_error = True
+    if outcome == 'exception':
+        mock_session.mock_adapter.register_uri(
+            'GET', MOCKED_URL, exc=RequestException('fabricated outage')
+        )
+    else:
+        mock_session.mock_adapter.register_uri('GET', MOCKED_URL, status_code=int(outcome))
+
+    with patch.object(
+        mock_session.cache, 'save_response', wraps=mock_session.cache.save_response
+    ) as mock_save:
+        result = mock_session.get(MOCKED_URL, headers={'Accept-Language': 'fr'})
+        if read_only:
+            mock_save.assert_not_called()
+
+    assert result.status_code == 200
+    assert result.from_cache is True
+    assert result.text == 'fr'
+    assert result.revalidated is (outcome == '304')
+    assert mock_session.mock_adapter.last_request.headers['If-None-Match'] == '"fr"'
+    assert mock_session.mock_adapter.call_count == 3
+
+
+@pytest.mark.parametrize('language, status_code', [('en-US', 200), ('fr', 504)])
+def test_request_only_if_cached__vary_redirect(mock_session, language, status_code):
+    mock_session.trust_env = False
+    mock_session.get(MOCKED_URL_VARY_REDIRECT, headers={'Accept-Language': 'en-US'})
+    before = mock_session.mock_adapter.call_count
+
+    response = mock_session.get(
+        MOCKED_URL_VARY_REDIRECT,
+        headers={'Accept-Language': language},
+        only_if_cached=True,
+    )
+
+    assert response.status_code == status_code
+    assert mock_session.mock_adapter.call_count == before
+
+
 @skip_pypy
 def test_request_only_if_cached__expired(mock_session):
     """By default, only_if_cached will not return an expired response"""
