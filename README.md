@@ -1,5 +1,10 @@
 [![](docs/_static/requests-cache-logo-header.png)](https://requests-cache.readthedocs.io)
 
+**Fork status**
+
+[![Fork code quality](https://app.codacy.com/project/badge/Grade/f7eebc3af2244df3b8ef58ee1a92d5cc?branch=main)](https://app.codacy.com/gh/ryanduguid/requests-cache/dashboard)
+[![Fork Build](https://github.com/ryanduguid/requests-cache/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/ryanduguid/requests-cache/actions/workflows/build.yml)
+
 [![Build](https://github.com/requests-cache/requests-cache/actions/workflows/build.yml/badge.svg)](https://github.com/requests-cache/requests-cache/actions)
 [![Codecov](https://codecov.io/gh/requests-cache/requests-cache/branch/main/graph/badge.svg?token=FnybzVWbt2)](https://codecov.io/gh/requests-cache/requests-cache)
 [![Documentation](https://img.shields.io/readthedocs/requests-cache/latest)](https://requests-cache.readthedocs.io/en/stable/)
