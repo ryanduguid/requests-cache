@@ -45,7 +45,12 @@ except ImportError:
 sys.path.insert(0, os.path.abspath('..'))
 
 from requests_cache import CachedSession
-from requests_cache.serializers import CattrStage, bson_serializer, pickle_serializer
+from requests_cache.serializers import (
+    CattrStage,
+    bson_serializer,
+    pickle_serializer,
+    ujson_serializer,
+)
 
 ITERATIONS = 10000
 
@@ -81,8 +86,7 @@ def run_cattrs_pickle():
 
 
 def run_cattrs_ujson():
-    s = CattrStage(factory=make_converter)
-    run_serialize_deserialize('cattrs+ujson', s)
+    run_serialize_deserialize('cattrs+ujson', ujson_serializer)
 
 
 def run_cattrs_bson():
@@ -92,11 +96,11 @@ def run_cattrs_bson():
 def run_serialize_deserialize(module, serializer):
     start = time()
     serialized = [serializer.dumps(r) for i in range(ITERATIONS)]
-    print(f'{module}.{serializer.__name__}.loads() x{ITERATIONS}: {time() - start:.3f}')
+    print(f'{module}.dumps() x{ITERATIONS}: {time() - start:.3f}')
 
     start = time()
     deserialized = [serializer.loads(obj) for obj in serialized]
-    print(f'{module}.{serializer.__name__}.dumps() x{ITERATIONS}: {time() - start:.3f}')
+    print(f'{module}.loads() x{ITERATIONS}: {time() - start:.3f}')
 
 
 if __name__ == '__main__':
