@@ -2,19 +2,19 @@
 
 **Fork status**
 
-[![Fork code quality](https://app.codacy.com/project/badge/Grade/f7eebc3af2244df3b8ef58ee1a92d5cc?branch=main)](https://app.codacy.com/gh/ryanduguid/requests-cache/dashboard)
-[![Fork Build](https://github.com/ryanduguid/requests-cache/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/ryanduguid/requests-cache/actions/workflows/build.yml)
+[![Fork code quality](https://img.shields.io/codacy/grade/f7eebc3af2244df3b8ef58ee1a92d5cc/main?style=flat&labelColor=000000)](https://app.codacy.com/gh/ryanduguid/requests-cache/dashboard)
+[![Fork Build](https://img.shields.io/github/actions/workflow/status/ryanduguid/requests-cache/build.yml?branch=main&label=Build&style=flat&labelColor=000000)](https://github.com/ryanduguid/requests-cache/actions/workflows/build.yml)
 
-[![Build](https://github.com/requests-cache/requests-cache/actions/workflows/build.yml/badge.svg)](https://github.com/requests-cache/requests-cache/actions)
+[![Build](https://img.shields.io/github/actions/workflow/status/requests-cache/requests-cache/build.yml?label=Build&style=flat&labelColor=000000)](https://github.com/requests-cache/requests-cache/actions)
 [![Codecov](https://codecov.io/gh/requests-cache/requests-cache/branch/main/graph/badge.svg?token=FnybzVWbt2)](https://codecov.io/gh/requests-cache/requests-cache)
-[![Documentation](https://img.shields.io/readthedocs/requests-cache/latest)](https://requests-cache.readthedocs.io/en/stable/)
+[![Documentation](https://img.shields.io/readthedocs/requests-cache/latest?style=flat&labelColor=000000)](https://requests-cache.readthedocs.io/en/stable/)
 [![Code Shelter](https://www.codeshelter.co/static/badges/badge-flat.svg)](https://www.codeshelter.co/)
 
-[![PyPI](https://img.shields.io/pypi/v/requests-cache?color=blue)](https://pypi.org/project/requests-cache)
-[![Conda](https://img.shields.io/conda/vn/conda-forge/requests-cache?color=blue)](https://anaconda.org/conda-forge/requests-cache)
-[![Arch](https://img.shields.io/archlinux/v/extra/any/python-requests-cache)](https://archlinux.org/packages/extra/any/python-requests-cache)
-[![PyPI - Python Versions](https://img.shields.io/pypi/pyversions/requests-cache)](https://pypi.org/project/requests-cache)
-[![PyPI - Downloads](https://img.shields.io/pypi/dm/requests-cache?color=blue)](https://pypi.org/project/requests-cache)
+[![PyPI](https://img.shields.io/pypi/v/requests-cache?color=66023C&style=flat&labelColor=000000)](https://pypi.org/project/requests-cache)
+[![Conda](https://img.shields.io/conda/vn/conda-forge/requests-cache?color=66023C&style=flat&labelColor=000000)](https://anaconda.org/conda-forge/requests-cache)
+[![Arch](https://img.shields.io/archlinux/v/extra/any/python-requests-cache?style=flat&labelColor=000000&color=66023C)](https://archlinux.org/packages/extra/any/python-requests-cache)
+[![PyPI - Python Versions](https://img.shields.io/pypi/pyversions/requests-cache?style=flat&labelColor=000000&color=66023C)](https://pypi.org/project/requests-cache)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/requests-cache?color=66023C&style=flat&labelColor=000000)](https://pypi.org/project/requests-cache)
 
 ## Summary
 **requests-cache** is a persistent HTTP cache that provides an easy way to get better
