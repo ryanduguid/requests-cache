@@ -8,7 +8,7 @@
 [![Build](https://img.shields.io/github/actions/workflow/status/requests-cache/requests-cache/build.yml?label=Build&style=flat&labelColor=000000)](https://github.com/requests-cache/requests-cache/actions)
 [![Codecov](https://codecov.io/gh/requests-cache/requests-cache/branch/main/graph/badge.svg?token=FnybzVWbt2)](https://codecov.io/gh/requests-cache/requests-cache)
 [![Documentation](https://img.shields.io/readthedocs/requests-cache/latest?style=flat&labelColor=000000)](https://requests-cache.readthedocs.io/en/stable/)
-[![Code Shelter](https://www.codeshelter.co/static/badges/badge-flat.svg)](https://www.codeshelter.co/)
+[![Code Shelter](https://img.shields.io/badge/code-sheltered-66023C?style=flat&labelColor=000000&color=66023C)](https://www.codeshelter.co/)
 
 [![PyPI](https://img.shields.io/pypi/v/requests-cache?color=66023C&style=flat&labelColor=000000)](https://pypi.org/project/requests-cache)
 [![Conda](https://img.shields.io/conda/vn/conda-forge/requests-cache?color=66023C&style=flat&labelColor=000000)](https://anaconda.org/conda-forge/requests-cache)
