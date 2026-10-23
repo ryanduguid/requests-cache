@@ -6,7 +6,7 @@
 [![Fork Build](https://img.shields.io/github/actions/workflow/status/ryanduguid/requests-cache/build.yml?branch=main&label=Build&style=flat&labelColor=000000)](https://github.com/ryanduguid/requests-cache/actions/workflows/build.yml)
 
 [![Build](https://img.shields.io/github/actions/workflow/status/requests-cache/requests-cache/build.yml?label=Build&style=flat&labelColor=000000)](https://github.com/requests-cache/requests-cache/actions)
-[![Codecov](https://codecov.io/gh/requests-cache/requests-cache/branch/main/graph/badge.svg?token=FnybzVWbt2)](https://codecov.io/gh/requests-cache/requests-cache)
+[![Codecov](https://img.shields.io/codecov/c/github/requests-cache/requests-cache/main?style=flat&labelColor=000000)](https://codecov.io/gh/requests-cache/requests-cache)
 [![Documentation](https://img.shields.io/readthedocs/requests-cache/latest?style=flat&labelColor=000000)](https://requests-cache.readthedocs.io/en/stable/)
 [![Code Shelter](https://img.shields.io/badge/code-sheltered-66023C?style=flat&labelColor=000000&color=66023C)](https://www.codeshelter.co/)
 
